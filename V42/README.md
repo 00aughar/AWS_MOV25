@@ -12,6 +12,12 @@ lämplig instanstyp (tänk kostnad, håll dig inom free tier).
 
 EC2 > Launch Instance > "webserver", amazon linux, t3 micro > new key pair > konfigurera säkerhetsregel > launch instance
 
+![alt text](Nyckelpar.png)
+
+![alt text](Säkerhetsregel.png)
+
+![alt text](<Aktiv instans.png>)
+
 ## Delmoment 3, Konfigurera värdmiljön
 Anslut via SSH och installera en webbserver.
 
@@ -54,10 +60,14 @@ EOF
 Visa att sidan går att nå. Dokumentera stegen i text, bild och kod.
 
 
+![alt text](<Http websidan.png>)
+
 
 ## Delmoment 6, Kostnadskontroll
 Sätt upp en månadsbudget i AWS Budgets med larm till din e-post, både på faktisk och på prognostiserad
 kostnad. Visa inställningarna i dokumentationen.
+
+![alt text](Budget.png)
 
 # VG
 
