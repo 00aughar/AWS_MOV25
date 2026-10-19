@@ -10,7 +10,10 @@
 Starta en EC2-instans åt Novatrix. Använd Amazon Linux. Skapa ett key pair och en security group. Välj en
 lämplig instanstyp (tänk kostnad, håll dig inom free tier).
 
-EC2 > Launch Instance > "webserver", amazon linux, t3 micro > new key pair > konfigurera säkerhetsregel > launch instance
+Konfigurera en EC2-instans via AWS portalen:
+EC2 > Launch Instance > Namn "webserver", OS: amazon linux, Instanstyp: t3 micro (Låg kostnad och får användas i free tier) > new key pair, Namn: "aws_webserver" > konfigurera säkerhetsregel, namn: "novatrix-web-sg", tillåt trafik på port 22 för ssh anslutning från min lokala hosts IP address & tillåt trafik på port 80 för HTTP så webservern kan besökas via internet  > Launch instance
+
+
 
 ![alt text](Nyckelpar.png)
 
