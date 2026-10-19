@@ -19,6 +19,7 @@ EC2 > Launch Instance > Namn "webserver", OS: amazon linux, Instanstyp: t3 micro
 
 ![alt text](Säkerhetsregel.png)
 
+Kontrollera att instansen körs i AWS portalen:
 ![alt text](<Aktiv instans.png>)
 
 ## Delmoment 3, Konfigurera värdmiljön
@@ -30,20 +31,21 @@ Navigera till mappen där nyckel lagras. Anslut sedan med:
 ssh -i .\aws_webserver.pem ec2-user@(webserverns publika ip)
 ```
 
-## Delmoment 4, Driftsätt applikationen
-Skapa en enkel webbsida som presenterar Novatrix namn och en kort text om tjänsten. Driftsätt den så att den
-visas när man surfar till instansens publika IP.
-
 Installation och uppstart av HTTPD
 ```
 sudo yum update -y
 sudo yum install httpd -y
 sudo systemctl start httpd
 sudo systemctl enable httpd
-sudo systemctl status httdp
+sudo systemctl status httpd
 ```
 Testa besök websida:
 http://(webservens publika IP)
+
+
+## Delmoment 4, Driftsätt applikationen
+Skapa en enkel webbsida som presenterar Novatrix namn och en kort text om tjänsten. Driftsätt den så att den
+visas när man surfar till instansens publika IP.
 
 Bygg upp HTML sidan
 ```
@@ -53,7 +55,7 @@ sudo tee /var/www/html/index.html > /dev/null <<'EOF'
 <head><meta charset="UTF-8"><title>Novatrix AB</title></head>
 <body>
   <h1>Novatrix AB</h1>
-  <p>Kort text om tjänsten här.</p>
+  <p>Denna websidan ska användas som en tjänst för Novatrix ärendeformulär och ska byggas upp med en Wordpress stack</p>
 </body>
 </html>
 EOF
@@ -63,12 +65,18 @@ EOF
 Visa att sidan går att nå. Dokumentera stegen i text, bild och kod.
 
 
-![alt text](<Http websidan.png>)
+![alt text](<Http websidan1.png>)
 
 
 ## Delmoment 6, Kostnadskontroll
 Sätt upp en månadsbudget i AWS Budgets med larm till din e-post, både på faktisk och på prognostiserad
 kostnad. Visa inställningarna i dokumentationen.
+
+Billing and Cost Management > Budgets > "Create Budget", template "Monthly Cost Budget", Vald budget $5.00 per månad, varning till min mail om 85% av budget nås & varning vid 100% av budget 
+
+Budget details:
+![alt text](<Budget details.png>)
+
 
 ![alt text](Budget.png)
 
@@ -138,7 +146,7 @@ systemctl enable --now httpd
 cat > /var/www/html/index.html <<'EOF'
 <!DOCTYPE html>
 <html lang="sv"><head><meta charset="UTF-8"><title>Novatrix AB</title></head>
-<body><h1>Novatrix AB</h1><p>Kort text om tjänsten.</p></body></html>
+<body><h1>Novatrix AB</h1><p>Denna websidan ska användas som en tjänst för Novatrix ärendeformulär och ska byggas upp med en Wordpress stack</p></body></html>
 EOF
 ```
 
