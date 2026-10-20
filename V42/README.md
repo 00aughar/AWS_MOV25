@@ -39,7 +39,10 @@ sudo systemctl start httpd
 sudo systemctl enable httpd
 sudo systemctl status httpd
 ```
-Testa besök websida:
+Status från *sudo systemctl status httpd*:
+![alt text](<http status.png>)
+
+Testa besök apache testsidans websida:
 http://(webservens publika IP)
 
 
@@ -84,7 +87,11 @@ Budget details:
 
 User data scriptet *user-data.sh* innehåller vad den nya instansen ska göra vid uppstart. Den installerar webbservern och bygger upp websidan som sedan kan besökas via den publika IP adressen för instansen. Deploy scriptet *deploy.ps1* automatiserar konfigurationsstegen för instansen. I scriptet defineras vilken region, namn, säkerhetsgrupp (*novatrix-web-sg*) & nyckelparet.
 
-Jag valde att ladda upp scripten i cloud shell via AWS portalen för att sedan köra dem med kommando: ```pwsh ./deploy.ps1```
+Jag valde att ladda upp scripten *deploy.ps1* & *user-data.sh* i cloud shell via AWS portalen för att sedan köra dem med kommando: ```pwsh ./deploy.ps1```.
+
+Förutsättningar för att återskapa miljön är:
+1. Nyckelparet behöver ha skapats i EU-north-1 sedan tidigare.
+2. IP adressen för den lokala hosten behöver fyllas i för ```$myip    = "DIN.IP.ADRESS.HÄR"```. Detta är för att säkerhetsgruppen som skapas *novatrix-web-sg* ska kunna släppa igenom trafik på port 22 för SSH anslutning.
 
 
 *deploy.ps1*
@@ -152,8 +159,8 @@ EOF
 
 *Reslutat körning*
 
-![alt text](<IaC körning.png>)
+![alt text](<IaC körning 1.png>)
 
 *Anslutning via terminal*
 
-![alt text](<Ansluten till server efter IaC script.png>)
+![alt text](<Anluten efter IaC.png>)
