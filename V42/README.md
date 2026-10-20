@@ -4,15 +4,12 @@
 
 **August Hartwig**
 **MOV25**
-**x/x**
+**20/10**
 
 ## Delmoment 2, Provisionera en EC2-instans
-Starta en EC2-instans åt Novatrix. Använd Amazon Linux. Skapa ett key pair och en security group. Välj en
-lämplig instanstyp (tänk kostnad, håll dig inom free tier).
 
 Konfigurera en EC2-instans via AWS portalen:
 EC2 > Launch Instance > Namn "webserver", OS: amazon linux, Instanstyp: t3 micro (Låg kostnad och får användas i free tier) > new key pair, Namn: "aws_webserver" > konfigurera säkerhetsregel, namn: "novatrix-web-sg", tillåt trafik på port 22 för ssh anslutning från min lokala hosts IP address & tillåt trafik på port 80 för HTTP så webservern kan besökas via internet  > Launch instance
-
 
 
 ![alt text](Nyckelpar.png)
@@ -47,10 +44,9 @@ http://(webservens publika IP)
 
 
 ## Delmoment 4, Driftsätt applikationen
-Skapa en enkel webbsida som presenterar Novatrix namn och en kort text om tjänsten. Driftsätt den så att den
-visas när man surfar till instansens publika IP.
 
-Bygg upp HTML sidan
+Bygg upp HTML sidan med följande kommando ansluten till instansen via terminalen:
+
 ```
 sudo tee /var/www/html/index.html > /dev/null <<'EOF'
 <!DOCTYPE html>
@@ -65,23 +61,25 @@ EOF
 ```
 
 ## Delmoment 5, Verifiera och dokumentera
-Visa att sidan går att nå. Dokumentera stegen i text, bild och kod.
 
+Sidan nås från internet, vilket betyder att instansen är igång och webbservern körs, att index.html ligger på rätt plats och att port 80 i säkerhetsgruppen är öppen för trafik.
 
+Besök sidan via den publika Ip-adressen för instansen:
 ![alt text](<Http websidan1.png>)
 
 
 ## Delmoment 6, Kostnadskontroll
-Sätt upp en månadsbudget i AWS Budgets med larm till din e-post, både på faktisk och på prognostiserad
-kostnad. Visa inställningarna i dokumentationen.
 
-Billing and Cost Management > Budgets > "Create Budget", template "Monthly Cost Budget", Vald budget $5.00 per månad, varning till min mail om 85% av budget nås & varning vid 100% av budget 
+Skapa budgetslarm:
+Billing and Cost Management > Budgets > "Create Budget", template "Monthly Cost Budget", Vald budget $5.00 per månad, varning till min mail om 85% av budget nås & varning vid 100% av budget.
 
-Budget details:
+Bilden nedan visar att email addressen för budgetlarm är verifierad. Om det faktiska kostnaden överstiger 85% & 100% ska jag få en varning, är den prognostiserad kostnaden över 100% ska jag få en varning
+
 ![alt text](<Budget details.png>)
 
-
 ![alt text](Budget.png)
+
+Efter jag är klar med labben terminerar jag instanserna för att inte ha pågående kostnader.
 
 # VG
 
@@ -91,7 +89,8 @@ Jag valde att ladda upp scripten *deploy.ps1* & *user-data.sh* i cloud shell via
 
 Förutsättningar för att återskapa miljön är:
 1. Nyckelparet behöver ha skapats i EU-north-1 sedan tidigare.
-2. IP adressen för den lokala hosten behöver fyllas i för ```$myip    = "DIN.IP.ADRESS.HÄR"```. Detta är för att säkerhetsgruppen som skapas *novatrix-web-sg* ska kunna släppa igenom trafik på port 22 för SSH anslutning.
+2. IP adressen för den lokala hosten behöver fyllas i för ```$myip    = "DIN.IP.ADRESS.HÄR"```. Detta är för att säkerhetsgruppen som skapas *novatrix-web-sg* ska kunna släppa igenom trafik på port 22 för SSH anslutning. Platshållaren är där för att inte IP adressen ska synas på det publika repot och exponeras.
+3. Uppladdning av User data scriptet & deploy scriptet till AWS cloud shell.
 
 
 *deploy.ps1*
