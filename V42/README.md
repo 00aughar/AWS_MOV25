@@ -14,7 +14,7 @@ EC2 > Launch Instance > Namn "webserver", OS: amazon linux, Instanstyp: t3 micro
 
 ![alt text](Nyckelpar.png)
 
-![alt text](Säkerhetsregel.png)
+![alt text](Säkerhetsregel-1.png)
 
 Kontrollera att instansen körs i AWS portalen:
 ![alt text](<Aktiv instans.png>)
