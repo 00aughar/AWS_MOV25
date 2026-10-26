@@ -1,0 +1,14 @@
+# Nycklar och inloggningsuppgifter - ska aldrig ligga i ett publikt repo
+*.pem
+*.key
+*accessKeys*.csv
+*credentials*.csv
+.aws/
+
+# Tillfälliga filer från iam-setup.sh (innehåller konto-ID)
+build/
+
+# Systemfiler från Windows och macOS
+Thumbs.db
+desktop.ini
+.DS_Store
