@@ -22,7 +22,7 @@ Under detta delmoment skapades följande upp Novatrix miljö:
 
 Motivering:
 
-Drift har policyn *AmazonS3FullAccess* dem sköta om lagringen som driftavdelningen.
+Drift har policyn *AmazonS3FullAccess* då de ska sköta om lagringen som driftavdelningen.
 
 Utveckling har policyn *AmazonS3ReadOnlyAccess* då dem endast ska kunna läsa filinnehållet i lagringen som utvecklingsavdelning.
 
@@ -87,8 +87,8 @@ aws s3 rm s3://novatrix-data-00aughar-01/test.txt
 
 Verifiera att attached policies gäller för user groups via användarna i portalen.
 
-- dev-erik - testa ladda upp en fil i bucket (resulutat nekad): ![alt text](<uppladdning av fil Erik.png>)
-- ops-anna - testa ladda upp en fil i bucket (resulutat godkänd): ![alt text](<uppladdning av fil Anna.png>)
+- dev-erik - testa ladda upp en fil i bucket (resultat nekad): ![alt text](<uppladdning av fil Erik.png>)
+- ops-anna - testa ladda upp en fil i bucket (resultat godkänd): ![alt text](<uppladdning av fil Anna.png>)
 
 - Kontrollera att filen laddats upp via konsolen:
 
@@ -98,7 +98,7 @@ Verifiera att attached policies gäller för user groups via användarna i porta
 
 # VG
 
-För VG delen byggdes en mer komplex behörighetslösning som riktar behörigheten mer tydligt beroende på gruppen eller rollens syfte enligt least privilege. Tabellerna visar hela behörighetsmodellen, vilka policies som gör vad, vilka behörigheter anvnändare/instanser får och deras syfte. Hela lösningen deployas via AWS CLI med scriptet i veckans repo *iam-setup.sh*
+För VG delen byggdes en mer komplex behörighetslösning som riktar behörigheten mer tydligt beroende på gruppen eller rollens syfte enligt least privilege. Tabellerna visar hela behörighetsmodellen, vilka policies som gör vad, vilka behörigheter användare/instanser får och deras syfte. Hela lösningen deployas via AWS CLI med scriptet i veckans repo *iam-setup.sh*
 
 ## Behörighetskedjan 
 Novatrix vill att driftpersonalen ska kunna driftsätta webbservrar utan att ha bred åtkomst till EC2. Därför är behörigheterna uppdelade i en kedja där varje del bara får göra det som krävs för nästa steg:
@@ -109,7 +109,7 @@ Assume role. Användarna i Drift har inga EC2-rättigheter direkt. I stället f�
 
 PassRole. När deploy-rollen startar en instans ger den instansen en roll. Rätten att göra det heter iam:PassRole. Utan begränsning skulle deploy-rollen kunna ge en instans vilken roll som helst, till exempel en med administratörsrättigheter, och på så sätt få mer behörighet än den själv har. Därför får deploy-rollen bara tilldela rollen *novatrix-ec2-s3-read*.
 
-least privilege genom hela kedjan. Deploy-rollen får bara starta instanser i storlek t3.micro och bara hantera instanser taggade novatrix-web. Webbrollen får bara läsa från novatrix-data-00aughar-01, inte skriva eller radera. Testerna visar att det som ligger utanför behörigheterna nekas.
+Least privilege genom hela kedjan. Deploy-rollen får bara starta instanser i storlek t3.micro och bara hantera instanser taggade novatrix-web. Webbrollen får bara läsa från novatrix-data-00aughar-01, inte skriva eller radera. Testerna visar att det som ligger utanför behörigheterna nekas.
 
 | Vem | Typ | Policy | Fil | Får göra | Får inte |
 |---|---|---|---|---|---|
