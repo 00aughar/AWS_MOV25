@@ -95,7 +95,6 @@ Verifiera att attached policies gäller för user groups via användarna i porta
 ![alt text](<kontrollera uppladdad fil konsol.png>)
 
 
-
 # VG
 
 För VG delen byggdes en mer komplex behörighetslösning som riktar behörigheten mer tydligt beroende på gruppen eller rollens syfte enligt least privilege. Tabellerna visar hela behörighetsmodellen, vilka policies som gör vad, vilka behörigheter användare/instanser får och deras syfte. Hela lösningen deployas via AWS CLI med scriptet i veckans repo *iam-setup.sh*
