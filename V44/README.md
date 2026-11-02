@@ -10,6 +10,61 @@
 
 - Du har byggt ett VPC med subnät och routing
 
+## Förklaring av lösningen:
+
+Lösningen bygger på defense in depth där flera lager an nätverkskompontenter, routing, security groups & NACL bygger en trygg och säkrad IT miljö. Syftet med lösningen är att skydda instanser, S3 bucket och framtida databas som Novatrix ska bygga. 
+
+## Lösningen
+
+## Nätverkskomponenter
+
+| Komponent | Namn | Värde | Syfte |
+|---|---|---|---|
+| VPC | `novatrix-vpc` | `10.0.0.0/16` | Novatrix eget isolerade nätverk i eu-north-1 |
+| Publikt subnät | `novatrix-public` | `10.0.1.0/24`, eu-north-1b | Webbservern, nåbar från internet |
+| Privat subnät | `novatrix-private-a` | `10.0.2.0/24`, eu-north-1b | Förberett för känsliga komponenter, ingen väg till internet |
+| Privat subnät | `novatrix-private-b` | `10.0.4.0/24`, eu-north-1b | Förberett för känsliga komponenter, ingen väg till internet |
+| Internet Gateway | `novatrix-igw` | Kopplad till `novatrix-vpc` | VPC:ts enda väg till och från internet |
+
+## Routing
+
+| Route table | Kopplad till | Destination | Mål | Effekt |
+|---|---|---|---|---|
+| `novatrix-public-rt` | `novatrix-public` | `10.0.0.0/16` | local | Trafik inom VPC:t |
+| `novatrix-public-rt` | `novatrix-public` | `0.0.0.0/0` | `novatrix-igw` | Gör subnätet publikt |
+| Main route table | `novatrix-private-a`, `novatrix-private-b` | `10.0.0.0/16` | local | Bara intern trafik, subnäten är privata |
+
+## Security group – `novatrix-web-sg` (instansnivå, stateful)
+
+| Riktning | Port | Protokoll | Källa | Syfte |
+|---|---|---|---|---|
+| Inbound | 80 | TCP | `0.0.0.0/0` | HTTP för besökare |
+| Inbound | 443 | TCP | `0.0.0.0/0` | HTTPS för besökare |
+| Inbound | 22 | TCP | Egen IP `/32` | SSH endast för administratören |
+| Outbound | Alla | Alla | `0.0.0.0/0` | Standard. Svar och uppdateringar (`dnf`) |
+
+## NACL – `novatrix-public-nacl` (subnätnivå, stateless)
+
+| Riktning | Regel | Port | Källa/mål | Tillåt/Neka | Syfte |
+|---|---|---|---|---|---|
+| Inbound | 100 | 80 | `0.0.0.0/0` | Tillåt | HTTP |
+| Inbound | 110 | 443 | `0.0.0.0/0` | Tillåt | HTTPS |
+| Inbound | 120 | 22 | Egen IP `/32` | Tillåt | SSH för admin |
+| Inbound | * | Alla | `0.0.0.0/0` | Neka | Allt annat |
+| Outbound | 100 | 80 | `0.0.0.0/0` | Tillåt | Uppdateringar via HTTP |
+| Outbound | 110 | 443 | `0.0.0.0/0` | Tillåt | Uppdateringar via HTTPS |
+| Outbound | 120 | 22 | Egen IP `/32` | Tillåt | SSH för admin |
+| Outbound | * | Alla | `0.0.0.0/0` | Neka | Allt annat |
+
+De privata subnäten använder VPC:ts standard-NACL.
+
+## Instans
+
+| Namn | Subnät | Typ | Säkerhetsgrupp | IAM-roll | Källa |
+|---|---|---|---|---|---|
+| `novatrix-web` | `novatrix-public` | t3.micro | `novatrix-web-sg` | `novatrix-ec2-s3-read` | AMI av den gamla instansen, eftersom en instans inte kan flyttas mellan VPC:er |
+
+
 ## Skapa VPC genom portalen
 Konfiguration:
 ![alt text](<VPC Konfiguration Portalen.png>)
@@ -119,4 +174,6 @@ Test-NetConnection <novatrix-web Publika IP> -Port 3306
 - Allt dokumenterat med skiss, PDF med repo-länk
 
 ## Nätverksskissen:
+![alt text](natverksskissen.png)
+
 ![alt text](Nätverksskiss.png)
