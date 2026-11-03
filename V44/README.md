@@ -4,7 +4,7 @@
 
 **August Hartwig**
 **MOV25**
-**x/x**
+**3/11**
 
 # Godkänt
 
@@ -12,7 +12,13 @@
 
 ## Förklaring av lösningen:
 
-Lösningen bygger på defense in depth där flera lager an nätverkskompontenter, routing, security groups & NACL bygger en trygg och säkrad IT miljö. Syftet med lösningen är att skydda instanser, S3 bucket och framtida databas som Novatrix ska bygga. 
+Lösningen bygger på defense in depth där flera lager an nätverkskompontenter, routing, security groups & NACL bygger en trygg och säkrad IT miljö, om ett av lagren briste står de andra kvar. Syftet med lösningen är att skydda de privata subnäten och i sin tur skydda webbservern och den framtida databasen som Novatrix ska bygga. 
+
+Besökaren besöker serverns publika IP > Trafkien går igenom "novatrix-igw" > Routing tabellen "novatrix-public-rt" leder vidare till subnätet "novatrix-public" > NACL "novatrix-public-nacl" släpper vidare på port 80 > Security group "novatrix-web-sg" släpper vidare på port 80 > websidan visas för besökaren
+
+Administratörens anslutning > SSH via terminalen mot serverns publika IP på port 22 > NACL "novatrix-public-nacl" tillåter trafik på port 22 endast från hostens publika IP adress > Security group "novatrix-web-sg" tillåter trafik på port 22 endast från hostens publika IP adress > SSH nyckeln avgör om anslutningen tillåts
+
+
 
 ## Lösningen
 
@@ -22,7 +28,7 @@ Lösningen bygger på defense in depth där flera lager an nätverkskompontenter
 |---|---|---|---|
 | VPC | `novatrix-vpc` | `10.0.0.0/16` | Novatrix eget isolerade nätverk i eu-north-1 |
 | Publikt subnät | `novatrix-public` | `10.0.1.0/24`, eu-north-1b | Webbservern, nåbar från internet |
-| Privat subnät | `novatrix-private-a` | `10.0.2.0/24`, eu-north-1b | Förberett för känsliga komponenter, ingen väg till internet |
+| Privat subnät | `novatrix-private-a` | `10.0.2.0/24`, eu-north-1a | Förberett för känsliga komponenter, ingen väg till internet |
 | Privat subnät | `novatrix-private-b` | `10.0.4.0/24`, eu-north-1b | Förberett för känsliga komponenter, ingen väg till internet |
 | Internet Gateway | `novatrix-igw` | Kopplad till `novatrix-vpc` | VPC:ts enda väg till och från internet |
 
@@ -50,10 +56,12 @@ Lösningen bygger på defense in depth där flera lager an nätverkskompontenter
 | Inbound | 100 | 80 | `0.0.0.0/0` | Tillåt | HTTP |
 | Inbound | 110 | 443 | `0.0.0.0/0` | Tillåt | HTTPS |
 | Inbound | 120 | 22 | Egen IP `/32` | Tillåt | SSH för admin |
+| Inbound | 130 | 1024–65535 | `0.0.0.0/0` | Tillåt | Svar på trafik som servern startat, t.ex. `dnf update` |
 | Inbound | * | Alla | `0.0.0.0/0` | Neka | Allt annat |
 | Outbound | 100 | 80 | `0.0.0.0/0` | Tillåt | Uppdateringar via HTTP |
 | Outbound | 110 | 443 | `0.0.0.0/0` | Tillåt | Uppdateringar via HTTPS |
 | Outbound | 120 | 22 | Egen IP `/32` | Tillåt | SSH för admin |
+| Outbound | 130 | 1024–65535 | `0.0.0.0/0` | Tillåt | Svar till besökare och SSH-klient |
 | Outbound | * | Alla | `0.0.0.0/0` | Neka | Allt annat |
 
 De privata subnäten använder VPC:ts standard-NACL.
@@ -132,10 +140,10 @@ aws ec2 run-instances --image-id 'ami-0905273365bf5833c' --instance-type 't3.mic
 ![alt text](<Network ACL Konfiguration Portalen.png>)
 
 ## Skapa Inbound rules "novatrix-public-nacl"
-![alt text](<Inbound Rules NACL novatrix-public-nacl.png>)
+![alt text](<NACL Inbound.png>)
 
 ## Skapa Outbound rules "novatrix-public-nacl"
-![alt text](<Outbound Rules NACL novatrix-public-nacl.png>)
+![alt text](<NACL Outbound.png>)
 
 ## Upprensing
 
@@ -160,7 +168,21 @@ Efter att instansen har startats och verifierats att websidan går att nå termi
 
 ## Testa Portarna
 
-Via powershell:
+## Verifiering av trafikflöden
+
+| Test | Från | Port | Förväntat | Resultat | Förklaring |
+|---|---|---|---|---|---|
+| Besöka webbsidan | Egen dator | 80 | Sidan visas | Visas | Tillåten för alla i både `novatrix-public-nacl` och `novatrix-web-sg`, och Apache svarar |
+| SSH | Egen IP | 22 | Anslutning lyckas | Ansluten | Port 22 är bara öppen för administratörens IP i både NACL och SG |
+| SSH | Okänd IP | 22 | Anslutning nekas | Timeout | IP-adressen finns inte i reglerna och stoppas redan i NACL:en |
+| `Test-NetConnection` | Egen dator | 22 | `True` | `True` | Samma regel som SSH-testet ovan |
+| `Test-NetConnection` | Egen dator | 80 | `True` | `True` | HTTP är öppet för alla |
+| `Test-NetConnection` | Egen dator | 443 | `False` | `False` | Porten är öppen i NACL och SG, men ingen HTTPS-tjänst körs på servern, så ingenting svarar |
+| `Test-NetConnection` | Egen dator | 3306 | `False` | `False` | Blockeras av både NACL (`* Deny`) och SG, där regeln saknas |
+
+
+Kommandon som användes:
+
 ```
 Test-NetConnection <novatrix-web Publika IP> -Port 22
 Test-NetConnection <novatrix-web Publika IP> -Port 80
@@ -174,6 +196,8 @@ Test-NetConnection <novatrix-web Publika IP> -Port 3306
 - Allt dokumenterat med skiss, PDF med repo-länk
 
 ## Nätverksskissen:
-![alt text](natverksskissen.png)
+![alt text](Nätverksskissen.png)
 
-![alt text](Nätverksskiss.png)
+
+## Resurskarta:
+![alt text](Resurskarta.png)
