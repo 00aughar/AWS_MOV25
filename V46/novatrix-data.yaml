@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Novatrix AB - datastacken (v46). RDS MariaDB med losenordet i Secrets Manager,
+  EFS for wp-content och S3 for backup. Importerar subnat och security groups
+  fran natstacken.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+    Description: Samma prefix som i natstacken
+  Environment:
+    Type: String
+    Default: test
+    AllowedValues: [test, prod]
+    Description: test = Single-AZ och backup 1 dag (Free plan). prod = Multi-AZ och backup 7 dagar
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t4g.micro, db.t3.small, db.t4g.small]
+  DbStorageGb:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+  BackupBucketName:
+    Type: String
+    Default: novatrix-backup-00aughar-01
+    Description: Globalt unikt bucketnamn
+  BackupRetentionDays:
+    Type: Number
+    Default: 14
+    Description: Hur lange databasbackuper i S3 sparas
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  # ================= Lager 4: losenordet i Secrets Manager =================
+  # CloudFormation genererar ett slumpat losenord. Det syns aldrig i koden,
+  # parametrarna eller user data. Webbservern hamtar det med sin IAM-roll.
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${Prefix}-db-secret"
+      Description: Inloggning till WordPress-databasen
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: password
+        PasswordLength: 24
+        ExcludePunctuation: true        # bara bokstaver och siffror
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "${Prefix}-db-subnets"
+      DBSubnetGroupDescription: Endast de privata subnaten
+      SubnetIds:
+        - !ImportValue { "Fn::Sub": "${Prefix}-PrivateSubnetAId" }
+        - !ImportValue { "Fn::Sub": "${Prefix}-PrivateSubnetBId" }
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete              # labbmiljo. I drift: Snapshot
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${Prefix}-db"
+      Engine: mariadb
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbStorageGb
+      StorageType: gp3
+      StorageEncrypted: true            # kryptering i vila
+      MultiAZ: !If [IsProd, true, false]
+      PubliclyAccessible: false         # databasen privat
+      DBName: wordpress
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue { "Fn::Sub": "${Prefix}-DbSgId" }
+      BackupRetentionPeriod: !If [IsProd, 7, 1]   # Free plan tillater max 1 dag
+      DeletionProtection: false
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-db" }]
+
+  # ================= Delad lagring: EFS =================
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+      FileSystemTags: [{ Key: Name, Value: !Sub "${Prefix}-efs" }]
+
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-PrivateSubnetAId" }
+      SecurityGroups: [!ImportValue { "Fn::Sub": "${Prefix}-EfsSgId" }]
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-PrivateSubnetBId" }
+      SecurityGroups: [!ImportValue { "Fn::Sub": "${Prefix}-EfsSgId" }]
+
+  # ================= Objektlagring: S3 for backup =================
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BackupBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: radera-gamla-backuper
+            Status: Enabled
+            Prefix: backup/
+            ExpirationInDays: !Ref BackupRetentionDays
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-backup" }]
+
+Outputs:
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+    Export: { Name: !Sub "${Prefix}-DbEndpoint" }
+  DbSecretArn:
+    Value: !Ref DbSecret
+    Export: { Name: !Sub "${Prefix}-DbSecretArn" }
+  EfsId:
+    Value: !Ref FileSystem
+    Export: { Name: !Sub "${Prefix}-EfsId" }
+  BackupBucketName:
+    Value: !Ref BackupBucket
+    Export: { Name: !Sub "${Prefix}-BackupBucketName" }
+  BackupBucketArn:
+    Value: !GetAtt BackupBucket.Arn
+    Export: { Name: !Sub "${Prefix}-BackupBucketArn" }

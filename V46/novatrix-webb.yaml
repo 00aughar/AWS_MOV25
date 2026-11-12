@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Novatrix AB - webbstacken (v46). IAM-roll med exakt de rattigheter som behovs,
+  bastion och webbserver som installerar och konfigurerar WordPress.
+  Importerar fran nat- och datastacken.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+    Description: Samma prefix som i nat- och datastacken
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: aws_webserver
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t4g.micro]
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  # ================= Lager 1: IAM, rollen med exakt de rattigheter som behovs =================
+  WebRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-web-role"
+      Description: Webbservern far lasa databashemligheten och skriva backuper, inget annat
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadDbSecret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !ImportValue { "Fn::Sub": "${Prefix}-DbSecretArn" }
+        - PolicyName: WriteBackupsOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub
+                  - "${BucketArn}/backup/*"
+                  - BucketArn: !ImportValue { "Fn::Sub": "${Prefix}-BackupBucketArn" }
+
+  WebInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${Prefix}-web-profile"
+      Roles: [!Ref WebRole]
+
+  # ================= Instanser =================
+  Bastion:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-PublicSubnetId" }
+      SecurityGroupIds: [!ImportValue { "Fn::Sub": "${Prefix}-BastionSgId" }]
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-bastion" }]
+
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-PublicSubnetId" }
+      SecurityGroupIds: [!ImportValue { "Fn::Sub": "${Prefix}-WebSgId" }]
+      IamInstanceProfile: !Ref WebInstanceProfile
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-web" }]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            # 1. Programvara
+            dnf install -y httpd php php-mysqlnd php-gd php-mbstring php-xml mariadb105 amazon-efs-utils
+            systemctl enable --now httpd php-fpm
+
+            # RDS certifikat for krypterad och verifierad databasanslutning
+            curl -s -o /etc/pki/ca-trust/source/anchors/rds-global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+            update-ca-trust
+
+            # 2. Montera EFS pa wp-content, aven efter omstart
+            mkdir -p /var/www/html/wp-content
+            echo "${EfsId}:/ /var/www/html/wp-content efs _netdev,noresvport,tls,nofail 0 0" >> /etc/fstab
+            for i in $(seq 1 30); do
+              mount -a && mountpoint -q /var/www/html/wp-content && break
+              sleep 10
+            done
+
+            # 3. WordPress, -n skriver inte over filer som redan finns pa EFS
+            cd /tmp
+            curl -sO https://wordpress.org/latest.tar.gz
+            tar -xzf latest.tar.gz
+            cp -rn /tmp/wordpress/. /var/www/html/
+
+            # 4. Hamta inloggningen fran Secrets Manager med instansens IAM-roll
+            SECRET=$(aws secretsmanager get-secret-value --secret-id "${SecretArn}" --region ${AWS::Region} --query SecretString --output text)
+            DB_USER=$(echo "$SECRET" | python3 -c 'import sys, json; print(json.load(sys.stdin)["username"])')
+            DB_PASS=$(echo "$SECRET" | python3 -c 'import sys, json; print(json.load(sys.stdin)["password"])')
+
+            # 5. wp-config.php med krypterad databasanslutning
+            cd /var/www/html
+            cp wp-config-sample.php wp-config.php
+            sed -i "s/database_name_here/wordpress/" wp-config.php
+            sed -i "s/username_here/$DB_USER/" wp-config.php
+            sed -i "s/password_here/$DB_PASS/" wp-config.php
+            sed -i "s/'localhost'/'${DbEndpoint}'/" wp-config.php
+            sed -i "/That's all, stop editing/i define( 'MYSQL_CLIENT_FLAGS', MYSQLI_CLIENT_SSL );" wp-config.php
+            chmod 640 wp-config.php
+
+            # 6. Unika sakerhetsnycklar fran WordPress
+            curl -s https://api.wordpress.org/secret-key/1.1/salt/ -o /tmp/salt.txt
+            python3 - <<'PY'
+            path = "/var/www/html/wp-config.php"
+            salt = open("/tmp/salt.txt").read().rstrip("\n")
+            out, done = [], False
+            for line in open(path).read().split("\n"):
+                if "put your unique phrase here" in line:
+                    if not done:
+                        out.append(salt)
+                        done = True
+                    continue
+                out.append(line)
+            open(path, "w").write("\n".join(out))
+            PY
+
+            # 7. Behorigheter och omstart
+            rm -f /var/www/html/index.html
+            chown -R apache:apache /var/www/html
+            systemctl restart httpd
+          - EfsId: !ImportValue { "Fn::Sub": "${Prefix}-EfsId" }
+            SecretArn: !ImportValue { "Fn::Sub": "${Prefix}-DbSecretArn" }
+            DbEndpoint: !ImportValue { "Fn::Sub": "${Prefix}-DbEndpoint" }
+
+Outputs:
+  Webbsida:
+    Value: !Sub "http://${WebServer.PublicIp}"
+  WebPublicIp:
+    Value: !GetAtt WebServer.PublicIp
+  WebPrivateIp:
+    Value: !GetAtt WebServer.PrivateIp
+  BastionPublicIp:
+    Value: !GetAtt Bastion.PublicIp
