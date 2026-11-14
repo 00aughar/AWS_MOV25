@@ -14,7 +14,7 @@ Parameters:
     Description: Globalt unikt bucketnamn
   BackupRetentionDays:
     Type: Number
-    Default: 14
+    Default: 21
     Description: Hur lange databasbackuper i S3 sparas
 
 Resources:
