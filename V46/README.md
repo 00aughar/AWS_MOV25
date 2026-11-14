@@ -45,7 +45,7 @@ Stacken är uppdelad i fyra mallar efter hur länge delarna ska leva och hur oft
 | `VpcCidr`, `PublicCidr`, `PrivateACidr`, `PrivateBCidr` | Nät | `10.0.0.0/16` osv. | Nätet kan placeras i ett annat adressintervall |
 | `Environment` | Data | `test` | `prod` ger Multi-AZ och 7 dagars backup, `test` ger Single-AZ och 1 dag |
 | `DbInstanceClass`, `DbStorageGb` | Data | `db.t3.micro`, `20` | Databasen kan skalas upp utan att mallen skrivs om |
-| `BackupBucketName`, `BackupRetentionDays` | Backup | `novatrix-backup-00aughar-01`, `14` | Bucketnamn är globala och lagringstiden kan variera |
+| `BackupBucketName`, `BackupRetentionDays` | Backup | `novatrix-backup-00aughar-01`, `21` | Bucketnamn är globala och lagringstiden kan variera |
 | `InstanceType`, `KeyName` | Webb | `t3.micro`, `aws_webserver` | Servern kan skalas upp och nyckelparet kan bytas |
 
 ### Säkerhet i koden
@@ -59,7 +59,7 @@ Stacken är uppdelad i fyra mallar efter hur länge delarna ska leva och hur oft
 
 Lösenordet syns aldrig i koden, i parametrarna eller i user data. CloudFormation genererar det i Secrets Manager, RDS använder det via en dynamisk referens, och webbservern hämtar det själv med sin IAM-roll när WordPress konfigureras.
 
-*novatrix-backup-yaml*
+*novatrix-backup.yaml*
 ```
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
@@ -77,7 +77,7 @@ Parameters:
     Description: Globalt unikt bucketnamn
   BackupRetentionDays:
     Type: Number
-    Default: 14
+    Default: 21
     Description: Hur lange databasbackuper i S3 sparas
 
 Resources:
@@ -645,6 +645,14 @@ Stackarna visas som complete efter deploy i CloudFormation portalen:
 
 ![alt text](<CloudFormation Stackar Complete.png>)
 
+Kontroll av vad som byggts upp i varje stack via terminalen:
+
+```aws cloudformation describe-stack-resources --stack-name <Stackens namn> --region eu-north-1 --query "StackResources[].[LogicalResourceId,ResourceType,ResourceStatus]" --output table```
+
+![alt text](<kontroll stack novatrix-nat.png>)
+![alt text](<Kontroll stack novatrix-data.png>)
+![alt text](<Kontroll stack novatrix-webb.png>)
+![alt text](<Kontroll stack novatrix-backup.png>)
 Exports i CloudFormation:
 
 ![alt text](<Export i CloudFormation.png>)
@@ -665,7 +673,6 @@ Hemlighet finns för databasen *novatrix-db-secret* i Secrets Manager:
 | 6 | Secrets Manager i konsolen | `novatrix-db-secret` finns | Lösenordet hanteras av Secrets Manager |
 | 7 | `aws s3 cp` från servern | Uppladdning lyckas | Rollen får skriva backuper |
 | 8 | `aws s3 ls` från servern | `AccessDenied` | Rollen får inte lista backuperna |
-| 9 | Port 22 mot webbservern | `False` | SSH endast via bastion |
 
 ### 1
 
@@ -705,3 +712,322 @@ Kontroll om fil sparats från host:
 
 
 # Delmoment 4, Versionshantering
+
+### Historiken
+
+![alt text](<Github historik.png>)
+
+### En ändring i mallen
+
+Som exempel ändrades lagringstiden för backuper i S3 från 14 till 21 dagar i `novatrix-backup.yaml`.
+
+```
+git add V46/novatrix-backup.yaml
+git commit -m "v46: spara backuper i 21 dagar i stället för 14"
+git diff HEAD~1 -- V46/novatrix-backup.yaml
+```
+![alt text](<git diff lagringstid.png>)
+
+Innan ändringen kördes skapades en change set, som visar vad CloudFormation tänker ändra:
+
+```
+bash V46/andring.sh backup
+```
+
+![alt text](<Change set backupbucket.png>)
+
+Kontroll via portalen:
+
+![alt text](<Change set portalen.png>)
+
+![alt text](<Change set JSON historik.png>)
+
+
+Change set visar att bara S3-bucketen påverkas (`Modify`, ingen `Replacement`). Bucketen och backuperna i den byts alltså inte ut, och resten av miljön berörs inte alls eftersom den ligger i andra stackar. Först när det var bekräftat kördes ändringen.
+
+### Hur versionshantering hjälper drift och samarbete
+
+- **Spårbarhet:** varje ändring har en commit med vem, när och varför. Vid ett fel går det att se vad som ändrades senast.
+- **Återställning:** en ändring som orsakar problem kan backas med `git revert` och deployas igen, så att miljön går tillbaka till ett känt fungerande läge.
+- **Granskning:** en ändring kan föreslås i en egen branch och granskas i en pull request innan den deployas. En säkerhetsmiss, till exempel en port som öppnas för `0.0.0.0/0`, syns direkt i `git diff`.
+- **Samma miljö för alla:** alla bygger från samma kod, så test och drift blir likadana och ingen behöver komma ihåg manuella klick.
+- **Change sets som extra skydd:** Git visar vad som ändrats i koden, och change set visar vad det betyder i AWS innan något händer.
+
+# Kontrollerad backup före rivning
+
+En backup som raderas tillsammans med miljön skyddar inte mot någonting. Därför ligger backup-bucketen i en egen stack, `novatrix-backup`, som `riv-allt.sh` inte rör. Bucketen har dessutom `DeletionPolicy: Retain`, så den finns kvar även om någon tar bort stacken, och versionshantering, så att en raderad backup kan hämtas tillbaka.
+
+1. Hämta skriptet till webbservern via bastion och kör det:
+
+```
+ssh -A ec2-user@<bastionens publika IP>
+ssh ec2-user@<webbserverns privata IP>
+curl -sO https://raw.githubusercontent.com/00aughar/AWS_MOV25/main/V46/backup.sh
+DB_HOST=<databasens endpoint> BUCKET=novatrix-backup-00aughar-01 bash backup.sh
+```
+
+2. Kontrollera från CloudShell eller Git Bash med admin-användaren:
+
+```
+aws s3 ls s3://novatrix-backup-00aughar-01/backup/
+```
+
+`backup.sh` hämtar lösenordet från Secrets Manager med serverns IAM-roll, dumpar databasen med `mysqldump` över krypterad anslutning, kontrollerar att filen inte är tom och laddar upp den till `backup/`. Webbserverns roll får skriva där men inte lista eller läsa, så kontrollen görs med admin-användaren. Om servern skulle komprometteras kan angriparen alltså inte läsa eller radera gamla backuper.
+
+Backup gjord från webserver:
+
+![alt text](<Backup tagen.png>)
+
+Backup av wordpress tagen och syns från hostens dator:
+
+![alt text](<Lista backup från host.png>)
+
+Först när backupen är kontrollerad rivs miljön. `riv-allt.sh` stoppar om det inte finns någon backup och visar annars den senaste filen med storlek och tid och frågar om den stämmer innan något rivs.
+
+
+# Delmoment 5, Återskapa stacken från repot
+
+Förutsättningar:
+- AWS CLI inloggad med en admin-användare (`aws configure`)
+- Nyckelparet `aws_webserver` finns i eu-north-1
+- Git Bash
+
+```
+git clone https://github.com/00aughar/AWS_MOV25.git
+cd AWS_MOV25
+bash V46/bygg-allt.sh $(curl -s https://checkip.amazonaws.com)
+```
+
+Första gången skapas även backupstacken. Efter 15–20 minuter skrivs webbplatsens adress ut, och efter ytterligare 2–3 minuter visar den WordPress installationssida.
+
+Riva:
+
+```
+bash V46/riv-allt.sh
+```
+
+Skriptet kontrollerar först att det finns en backup i S3. Sedan rivs stackarna i omvänd ordning, webb, data, nät, eftersom en stack inte kan tas bort så länge en annan importerar dess exports. Backupstacken lämnas kvar.
+
+![alt text](<Rivning av stack.png>)
+
+Kontroll i portalen. Stack *novatrix-backup* kvar resterande stackar borttagna:
+
+![alt text](<Backup stack kvar.png>)
+
+![alt text](<Stackar bortagna.png>)
+
+Bucketen med backupen finns kvar:
+
+![alt text](<S3 bucket kvar.png>)
+
+# VG
+
+Hela stacken, nätverk, compute, databas, lagring och säkerhet, provisioneras som kod och återskapas från repot utan manuella konsolsteg. Jämfört med v45 har fyra saker tillkommit:
+
+| v45 | v46 |
+|---|---|
+| En mall | Fyra stackar kopplade med Export och ImportValue |
+| Databaslösenordet som parameter, synligt i user data | Lösenordet slumpas och lagras i Secrets Manager, och webbservern hämtar det med IAM-rollen |
+| IAM-rollen skapades av ett separat skript från v43 | IAM-rollen skapas i webbstacken, med bara de rättigheter som behövs |
+| Bucketen revs med miljön | Backuperna ligger i en egen stack som överlever rivningen, och rivning kräver en kontrollerad backup |
+
+### Kända begränsningar
+
+- **`DeletionPolicy: Delete`** på databasen gör att ingen snapshot sparas när stacken rivs. Det passar en labbmiljö, men i drift hade `Snapshot` använts.
+- **Lösenordet hamnar i `wp-config.php`** på webbservern, eftersom WordPress behöver det där. Filen är bara läsbar för root och Apache.
+- **Ingen automatisk rotation av lösenordet.** Med rotation skulle wp-config behöva uppdateras automatiskt. Det hade varit nästa steg i drift.
+- **HTTPS saknas.** Port 443 är förberedd, men ett certifikat för webbplatsen ingår inte.
+
+*bygg-allt.sh*
+
+```
+#!/bin/bash
+# bygg-allt.sh - Bygger Novatrix WordPress-stack: backup -> nat -> data -> webb
+# Backupstacken skapas bara forsta gangen, darefter finns den kvar mellan rivningarna.
+# Kor i Git Bash med din publika IP som argument:
+#   bash V46/bygg-allt.sh $(curl -s https://checkip.amazonaws.com)
+# Valfritt andra argument: miljo (test eller prod), standard test.
+
+MYIP="$(echo "$1" | tr -d '[:space:]')"
+ENV="${2:-test}"
+REGION="eu-north-1"
+PREFIX="novatrix"
+
+V46_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$V46_DIR" || exit 1
+
+if [ -z "$MYIP" ]; then
+  echo "FEL: ange din publika IP, t.ex.:  bash V46/bygg-allt.sh \$(curl -s https://checkip.amazonaws.com)"
+  exit 1
+fi
+echo "Admin-IP: $MYIP   Miljo: $ENV"
+
+# Validera alla mallar innan nagot byggs
+echo "=== Validerar mallarna ==="
+for t in novatrix-backup.yaml novatrix-nat.yaml novatrix-data.yaml novatrix-webb.yaml; do
+  aws cloudformation validate-template --template-body "file://$t" --region "$REGION" >/dev/null \
+    && echo "OK  $t" || { echo "FEL i $t"; exit 1; }
+done
+
+deploy () {
+  echo ""
+  echo "=== $1 ==="
+  aws cloudformation deploy --region "$REGION" --stack-name "$PREFIX-$1" --template-file "$2" --no-fail-on-empty-changeset "${@:3}" \
+    || { echo "FEL: stacken $PREFIX-$1 misslyckades. Se Events i CloudFormation-konsolen."; exit 1; }
+}
+
+deploy backup novatrix-backup.yaml --parameter-overrides Prefix="$PREFIX"
+deploy nat  novatrix-nat.yaml  --parameter-overrides Prefix="$PREFIX" MyIp="$MYIP/32"
+deploy data novatrix-data.yaml --parameter-overrides Prefix="$PREFIX" Environment="$ENV"
+deploy webb novatrix-webb.yaml --parameter-overrides Prefix="$PREFIX" --capabilities CAPABILITY_NAMED_IAM
+
+echo ""
+echo "=== Klar ==="
+aws cloudformation describe-stacks --stack-name "$PREFIX-webb" --region "$REGION" \
+  --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" --output table
+echo "Vanta 2-3 minuter sa att user data hinner installera WordPress innan du oppnar webbsidan."
+```
+
+*backup.sh*
+
+```
+#!/bin/bash
+# backup.sh - Tar en backup av WordPress-databasen och laddar upp den till S3.
+# Kors pa novatrix-web (servern har mysqldump och en IAM-roll som far skriva i backup/):
+#   DB_HOST=<endpoint> BUCKET=<backupbucket> bash backup.sh
+# Losenordet hamtas fran Secrets Manager med serverns IAM-roll.
+
+REGION="eu-north-1"
+SECRET_ID="${SECRET_ID:-novatrix-db-secret}"
+DB_NAME="${DB_NAME:-wordpress}"
+
+if [ -z "$DB_HOST" ] || [ -z "$BUCKET" ]; then
+  echo "Anvandning: DB_HOST=<endpoint> BUCKET=<backupbucket> bash backup.sh"
+  exit 1
+fi
+
+# 1. Inloggningen fran Secrets Manager
+SECRET=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --region "$REGION" \
+  --query SecretString --output text) || { echo "FEL: kunde inte lasa $SECRET_ID"; exit 1; }
+DB_USER=$(echo "$SECRET" | python3 -c 'import sys, json; print(json.load(sys.stdin)["username"])')
+export MYSQL_PWD=$(echo "$SECRET" | python3 -c 'import sys, json; print(json.load(sys.stdin)["password"])')
+
+# 2. Dump over krypterad anslutning, komprimerad
+FIL="wordpress-$(date +%Y%m%d-%H%M%S).sql.gz"
+echo "Tar backup av $DB_NAME pa $DB_HOST..."
+set -o pipefail
+mysqldump -h "$DB_HOST" -u "$DB_USER" --ssl --single-transaction --routines "$DB_NAME" \
+  | gzip > "/tmp/$FIL" || { echo "FEL: mysqldump misslyckades"; rm -f "/tmp/$FIL"; exit 1; }
+unset MYSQL_PWD
+
+# 3. Kontrollera att filen inte ar tom
+STORLEK=$(stat -c %s "/tmp/$FIL")
+if [ "$STORLEK" -lt 1000 ]; then
+  echo "FEL: backupen ar bara $STORLEK byte, nagot gick fel"; rm -f "/tmp/$FIL"; exit 1
+fi
+
+# 4. Ladda upp till S3. Rollen far bara skriva i backup/, inte lista eller lasa
+aws s3 cp "/tmp/$FIL" "s3://$BUCKET/backup/$FIL" --region "$REGION" \
+  || { echo "FEL: uppladdningen misslyckades"; exit 1; }
+rm -f "/tmp/$FIL"
+echo "Klar: s3://$BUCKET/backup/$FIL ($STORLEK byte)"
+echo "Kontrollera fran CloudShell:  aws s3 ls s3://$BUCKET/backup/"
+```
+
+*riv-allt.sh*
+
+```
+#!/bin/bash
+# riv-allt.sh - River miljon i omvand ordning: webb -> data -> nat
+# En stack kan inte tas bort sa lange en annan stack importerar dess exports.
+# Backupstacken (novatrix-backup) rivs INTE, sa backuperna finns kvar.
+# Skriptet kontrollerar forst att det finns en backup: forst backup, sedan rivning.
+
+REGION="eu-north-1"
+PREFIX="novatrix"
+
+# 1. Kontrollerad backup
+BUCKET=$(aws cloudformation describe-stacks --stack-name "$PREFIX-backup" --region "$REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='BackupBucketName'].OutputValue" --output text 2>/dev/null | tr -d '\r')
+SENASTE=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix backup/ --region "$REGION" \
+  --query "sort_by(Contents,&LastModified)[-1].[Key,Size,LastModified]" --output text 2>/dev/null | tr -d '\r')
+read -r KEY SIZE TID <<< "$SENASTE"
+
+if [ -z "$KEY" ] || [ "$KEY" = "None" ] || [ "${SIZE:-0}" -eq 0 ]; then
+  echo "STOPP: ingen backup hittades i s3://$BUCKET/backup/"
+  echo "Kor backup.sh pa novatrix-web forst. Inget har rivits."
+  exit 1
+fi
+echo "Senaste backup: $KEY  ($SIZE byte, $TID)"
+read -p "Ar det ratt backup? Riv miljon? (j/n) " SVAR
+[ "$SVAR" = "j" ] || { echo "Avbrutet, inget har rivits."; exit 0; }
+
+# 2. Rivning
+riv () {
+  echo "=== Tar bort $PREFIX-$1 ==="
+  aws cloudformation delete-stack --stack-name "$PREFIX-$1" --region "$REGION"
+  aws cloudformation wait stack-delete-complete --stack-name "$PREFIX-$1" --region "$REGION" \
+    && echo "Borttagen: $PREFIX-$1" || { echo "FEL: kunde inte ta bort $PREFIX-$1"; exit 1; }
+}
+
+riv webb
+riv data
+riv nat
+echo "Klar. Miljon ar riven. Backuperna finns kvar i s3://$BUCKET/backup/"
+```
+
+*andring.sh*
+
+```
+#!/bin/bash
+# andring.sh - Visar vad en andring i en mall kommer att gora innan den kors (change set)
+# Anvandning:  bash V46/andring.sh <backup|nat|data|webb> [parametrar...]
+# Exempel:     bash V46/andring.sh data Environment=test
+# Skriptet skapar en change set, visar den och fragar om den ska koras.
+
+STACK_DEL="$1"; shift
+REGION="eu-north-1"
+PREFIX="novatrix"
+STACK="$PREFIX-$STACK_DEL"
+TEMPLATE="novatrix-$STACK_DEL.yaml"
+CHANGESET="andring-$(date +%Y%m%d-%H%M%S)"
+
+V46_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$V46_DIR" || exit 1
+[ -f "$TEMPLATE" ] || { echo "Anvandning: bash V46/andring.sh <backup|nat|data|webb> [parametrar...]"; exit 1; }
+
+PARAMS=""
+for p in "Prefix=$PREFIX" "$@"; do
+  PARAMS="$PARAMS ParameterKey=${p%%=*},ParameterValue=${p#*=}"
+done
+# Parametrar som inte anges behaller sitt nuvarande varde i stacken
+for key in $(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \
+    --query "Stacks[0].Parameters[].ParameterKey" --output text | tr -d '\r'); do
+  case " $PARAMS " in *"ParameterKey=$key,"*) ;; *) PARAMS="$PARAMS ParameterKey=$key,UsePreviousValue=true";; esac
+done
+
+CAPS=""
+[ "$STACK_DEL" = "webb" ] && CAPS="--capabilities CAPABILITY_NAMED_IAM"
+
+echo "=== Skapar change set $CHANGESET for $STACK ==="
+aws cloudformation create-change-set --stack-name "$STACK" --change-set-name "$CHANGESET" \
+  --template-body "file://$TEMPLATE" --parameters $PARAMS $CAPS --region "$REGION" >/dev/null || exit 1
+aws cloudformation wait change-set-create-complete --stack-name "$STACK" --change-set-name "$CHANGESET" --region "$REGION" 2>/dev/null
+
+echo ""
+echo "=== Planerade andringar ==="
+aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$CHANGESET" --region "$REGION" \
+  --query "Changes[].ResourceChange.[Action,LogicalResourceId,ResourceType,Replacement]" --output table
+STATUS=$(aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$CHANGESET" --region "$REGION" \
+  --query "StatusReason" --output text | tr -d '\r')
+[ "$STATUS" != "None" ] && echo "$STATUS"
+
+read -p "Kor andringen? (j/n) " SVAR
+if [ "$SVAR" = "j" ]; then
+  aws cloudformation execute-change-set --stack-name "$STACK" --change-set-name "$CHANGESET" --region "$REGION"
+  aws cloudformation wait stack-update-complete --stack-name "$STACK" --region "$REGION" && echo "Klar: $STACK uppdaterad."
+else
+  aws cloudformation delete-change-set --stack-name "$STACK" --change-set-name "$CHANGESET" --region "$REGION"
+  echo "Avbruten, inget andrades."
+fi
+```
