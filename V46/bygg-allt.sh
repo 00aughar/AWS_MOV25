@@ -1,5 +1,6 @@
 #!/bin/bash
-# bygg-allt.sh - Bygger Novatrix WordPress-stack i tre stackar: nat -> data -> webb
+# bygg-allt.sh - Bygger Novatrix WordPress-stack: backup -> nat -> data -> webb
+# Backupstacken skapas bara forsta gangen, darefter finns den kvar mellan rivningarna.
 # Kor i Git Bash med din publika IP som argument:
 #   bash V46/bygg-allt.sh $(curl -s https://checkip.amazonaws.com)
 # Valfritt andra argument: miljo (test eller prod), standard test.
@@ -20,7 +21,7 @@ echo "Admin-IP: $MYIP   Miljo: $ENV"
 
 # Validera alla mallar innan nagot byggs
 echo "=== Validerar mallarna ==="
-for t in novatrix-nat.yaml novatrix-data.yaml novatrix-webb.yaml; do
+for t in novatrix-backup.yaml novatrix-nat.yaml novatrix-data.yaml novatrix-webb.yaml; do
   aws cloudformation validate-template --template-body "file://$t" --region "$REGION" >/dev/null \
     && echo "OK  $t" || { echo "FEL i $t"; exit 1; }
 done
@@ -28,10 +29,11 @@ done
 deploy () {
   echo ""
   echo "=== $1 ==="
-  aws cloudformation deploy --region "$REGION" --stack-name "$PREFIX-$1" --template-file "$2" "${@:3}" \
+  aws cloudformation deploy --region "$REGION" --stack-name "$PREFIX-$1" --template-file "$2" --no-fail-on-empty-changeset "${@:3}" \
     || { echo "FEL: stacken $PREFIX-$1 misslyckades. Se Events i CloudFormation-konsolen."; exit 1; }
 }
 
+deploy backup novatrix-backup.yaml --parameter-overrides Prefix="$PREFIX"
 deploy nat  novatrix-nat.yaml  --parameter-overrides Prefix="$PREFIX" MyIp="$MYIP/32"
 deploy data novatrix-data.yaml --parameter-overrides Prefix="$PREFIX" Environment="$ENV"
 deploy webb novatrix-webb.yaml --parameter-overrides Prefix="$PREFIX" --capabilities CAPABILITY_NAMED_IAM

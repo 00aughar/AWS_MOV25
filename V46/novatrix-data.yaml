@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Novatrix AB - datastacken (v46). RDS MariaDB med losenordet i Secrets Manager,
-  EFS for wp-content och S3 for backup. Importerar subnat och security groups
-  fran natstacken.
+  Novatrix AB - datastacken (v46). RDS MariaDB med losenordet i Secrets Manager
+  och EFS for wp-content. Importerar subnat och security groups fran natstacken.
+  Backup-bucketen ligger i en egen stack (novatrix-backup) som inte rivs med miljon.
 
 Parameters:
   Prefix:
@@ -23,14 +23,6 @@ Parameters:
     Default: 20
     MinValue: 20
     MaxValue: 100
-  BackupBucketName:
-    Type: String
-    Default: novatrix-backup-00aughar-01
-    Description: Globalt unikt bucketnamn
-  BackupRetentionDays:
-    Type: Number
-    Default: 14
-    Description: Hur lange databasbackuper i S3 sparas
 
 Conditions:
   IsProd: !Equals [!Ref Environment, prod]
@@ -107,27 +99,6 @@ Resources:
       SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-PrivateSubnetBId" }
       SecurityGroups: [!ImportValue { "Fn::Sub": "${Prefix}-EfsSgId" }]
 
-  # ================= Objektlagring: S3 for backup =================
-  BackupBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Ref BackupBucketName
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
-      LifecycleConfiguration:
-        Rules:
-          - Id: radera-gamla-backuper
-            Status: Enabled
-            Prefix: backup/
-            ExpirationInDays: !Ref BackupRetentionDays
-      Tags: [{ Key: Name, Value: !Sub "${Prefix}-backup" }]
-
 Outputs:
   DbEndpoint:
     Value: !GetAtt Database.Endpoint.Address
@@ -138,9 +109,3 @@ Outputs:
   EfsId:
     Value: !Ref FileSystem
     Export: { Name: !Sub "${Prefix}-EfsId" }
-  BackupBucketName:
-    Value: !Ref BackupBucket
-    Export: { Name: !Sub "${Prefix}-BackupBucketName" }
-  BackupBucketArn:
-    Value: !GetAtt BackupBucket.Arn
-    Export: { Name: !Sub "${Prefix}-BackupBucketArn" }

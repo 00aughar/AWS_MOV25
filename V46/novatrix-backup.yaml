@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Novatrix AB - backupstacken (v46). S3-bucket for databasbackuper.
+  Ligger i en egen stack eftersom backuperna ska overleva nar miljon rivs.
+  riv-allt.sh ror inte den har stacken.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+  BackupBucketName:
+    Type: String
+    Default: novatrix-backup-00aughar-01
+    Description: Globalt unikt bucketnamn
+  BackupRetentionDays:
+    Type: Number
+    Default: 14
+    Description: Hur lange databasbackuper i S3 sparas
+
+Resources:
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain          # bucketen och backuperna finns kvar aven om stacken tas bort
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BackupBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      VersioningConfiguration:
+        Status: Enabled             # en overskriven eller raderad backup kan hamtas tillbaka
+      LifecycleConfiguration:
+        Rules:
+          - Id: radera-gamla-backuper
+            Status: Enabled
+            Prefix: backup/
+            ExpirationInDays: !Ref BackupRetentionDays
+            NoncurrentVersionExpiration: { NoncurrentDays: 7 }
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-backup" }]
+
+Outputs:
+  BackupBucketName:
+    Value: !Ref BackupBucket
+    Export: { Name: !Sub "${Prefix}-BackupBucketName" }
+  BackupBucketArn:
+    Value: !GetAtt BackupBucket.Arn
+    Export: { Name: !Sub "${Prefix}-BackupBucketArn" }

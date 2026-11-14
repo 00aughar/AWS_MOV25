@@ -1,6 +1,6 @@
 #!/bin/bash
 # andring.sh - Visar vad en andring i en mall kommer att gora innan den kors (change set)
-# Anvandning:  bash V46/andring.sh <nat|data|webb> [parametrar...]
+# Anvandning:  bash V46/andring.sh <backup|nat|data|webb> [parametrar...]
 # Exempel:     bash V46/andring.sh data Environment=test
 # Skriptet skapar en change set, visar den och fragar om den ska koras.
 
@@ -13,7 +13,7 @@ CHANGESET="andring-$(date +%Y%m%d-%H%M%S)"
 
 V46_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$V46_DIR" || exit 1
-[ -f "$TEMPLATE" ] || { echo "Anvandning: bash V46/andring.sh <nat|data|webb> [parametrar...]"; exit 1; }
+[ -f "$TEMPLATE" ] || { echo "Anvandning: bash V46/andring.sh <backup|nat|data|webb> [parametrar...]"; exit 1; }
 
 PARAMS=""
 for p in "Prefix=$PREFIX" "$@"; do
