@@ -4,11 +4,11 @@
 
 **August Hartwig**
 **MOV25**
-**x/x**
+**17/11**
 
 Hittills har Novatrix WordPress-stack byggts bit för bit, delvis i konsolen och delvis med skript. Den här veckan samlas hela stacken som kod i fyra CloudFormation-mallar som är versionshanterade i GitHub. Den gamla miljön som byggts i konsolen har rivits, och hela lösningen återskapas från repot med ett kommando, utan manuella konsolsteg. Innan miljön rivs tas en kontrollerad backup av databasen till S3, och den backupen finns kvar efter rivningen.
 
-![alt text](arkitektur-v46.png)
+![alt text](arkitektur-v46(1).png)
 
 # Delmoment 1, Repo
 
@@ -647,7 +647,9 @@ Stackarna visas som complete efter deploy i CloudFormation portalen:
 
 Kontroll av vad som byggts upp i varje stack via terminalen:
 
-```aws cloudformation describe-stack-resources --stack-name <Stackens namn> --region eu-north-1 --query "StackResources[].[LogicalResourceId,ResourceType,ResourceStatus]" --output table```
+```
+aws cloudformation describe-stack-resources --stack-name <Stackens namn> --region eu-north-1 --query "StackResources[].[LogicalResourceId,ResourceType,ResourceStatus]" --output table
+```
 
 ![alt text](<kontroll stack novatrix-nat.png>)
 ![alt text](<Kontroll stack novatrix-data.png>)
@@ -731,7 +733,7 @@ git diff HEAD~1 -- V46/novatrix-backup.yaml
 Innan ändringen kördes skapades en change set, som visar vad CloudFormation tänker ändra:
 
 ```
-bash V46/andring.sh backup
+bash V46/andring.sh backup BackupRetentionDays=21
 ```
 
 ![alt text](<Change set backupbucket.png>)
@@ -835,8 +837,7 @@ Hela stacken, nätverk, compute, databas, lagring och säkerhet, provisioneras s
 
 - **`DeletionPolicy: Delete`** på databasen gör att ingen snapshot sparas när stacken rivs. Det passar en labbmiljö, men i drift hade `Snapshot` använts.
 - **Lösenordet hamnar i `wp-config.php`** på webbservern, eftersom WordPress behöver det där. Filen är bara läsbar för root och Apache.
-- **Ingen automatisk rotation av lösenordet.** Med rotation skulle wp-config behöva uppdateras automatiskt. Det hade varit nästa steg i drift.
-- **HTTPS saknas.** Port 443 är förberedd, men ett certifikat för webbplatsen ingår inte.
+
 
 *bygg-allt.sh*
 
