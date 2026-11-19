@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Novatrix AB - datastacken (v47). RDS MariaDB med losenordet i Secrets Manager
+  och EFS for wp-content. Importerar subnat och security groups fran natstacken.
+  Backup-bucketen ligger i en egen stack (novatrix-backup) som inte rivs med miljon.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+    Description: Samma prefix som i natstacken
+  Environment:
+    Type: String
+    Default: test
+    AllowedValues: [test, prod]
+    Description: test = Single-AZ och backup 1 dag (Free plan). prod = Multi-AZ och backup 7 dagar
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t4g.micro, db.t3.small, db.t4g.small]
+  DbStorageGb:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  # ================= Lager 4: losenordet i Secrets Manager =================
+  # CloudFormation genererar ett slumpat losenord. Det syns aldrig i koden,
+  # parametrarna eller user data. Webbservern hamtar det med sin IAM-roll.
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${Prefix}-db-secret"
+      Description: Inloggning till WordPress-databasen
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: password
+        PasswordLength: 24
+        ExcludePunctuation: true        # bara bokstaver och siffror
+
+  # Nytt i v47: samma salts och samma admin-inloggning for alla servrar i gruppen
+  WpSaltSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${Prefix}-wp-salt"
+      Description: Gemensam grund for WordPress salts, sa att inloggningen fungerar oavsett server
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+
+  WpAdminSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${Prefix}-wp-admin"
+      Description: WordPress administrator, skapas automatiskt av forsta servern
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "novatrixadmin"}'
+        GenerateStringKey: password
+        PasswordLength: 20
+        ExcludePunctuation: true
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "${Prefix}-db-subnets"
+      DBSubnetGroupDescription: Endast de privata subnaten
+      SubnetIds:
+        - !ImportValue { "Fn::Sub": "${Prefix}-PrivateSubnetAId" }
+        - !ImportValue { "Fn::Sub": "${Prefix}-PrivateSubnetBId" }
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete              # labbmiljo. I drift: Snapshot
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${Prefix}-db"
+      Engine: mariadb
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbStorageGb
+      StorageType: gp3
+      StorageEncrypted: true            # kryptering i vila
+      MultiAZ: !If [IsProd, true, false]
+      PubliclyAccessible: false         # databasen privat
+      DBName: wordpress
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue { "Fn::Sub": "${Prefix}-DbSgId" }
+      BackupRetentionPeriod: !If [IsProd, 7, 1]   # Free plan tillater max 1 dag
+      DeletionProtection: false
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-db" }]
+
+  # ================= Delad lagring: EFS =================
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+      FileSystemTags: [{ Key: Name, Value: !Sub "${Prefix}-efs" }]
+
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-PrivateSubnetAId" }
+      SecurityGroups: [!ImportValue { "Fn::Sub": "${Prefix}-EfsSgId" }]
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-PrivateSubnetBId" }
+      SecurityGroups: [!ImportValue { "Fn::Sub": "${Prefix}-EfsSgId" }]
+
+Outputs:
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+    Export: { Name: !Sub "${Prefix}-DbEndpoint" }
+  DbSecretArn:
+    Value: !Ref DbSecret
+    Export: { Name: !Sub "${Prefix}-DbSecretArn" }
+  EfsId:
+    Value: !Ref FileSystem
+    Export: { Name: !Sub "${Prefix}-EfsId" }
+  WpSaltSecretArn:
+    Value: !Ref WpSaltSecret
+    Export: { Name: !Sub "${Prefix}-WpSaltSecretArn" }
+  WpAdminSecretArn:
+    Value: !Ref WpAdminSecret
+    Export: { Name: !Sub "${Prefix}-WpAdminSecretArn" }

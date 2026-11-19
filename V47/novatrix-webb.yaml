@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Novatrix AB - webbstacken (v47). IAM-roll och instance profile for webbservrarna
+  samt bastion. Sjalva webbservrarna startas av Auto Scaling-gruppen i novatrix-skala.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+    Description: Samma prefix som i de andra stackarna
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: aws_webserver
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  # ================= Lager 1: IAM, rollen med exakt de rattigheter som behovs =================
+  WebRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-web-role"
+      Description: Webbservrarna far lasa sina hemligheter, skriva backuper och signalera klar, inget annat
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !ImportValue { "Fn::Sub": "${Prefix}-DbSecretArn" }
+                  - !ImportValue { "Fn::Sub": "${Prefix}-WpSaltSecretArn" }
+                  - !ImportValue { "Fn::Sub": "${Prefix}-WpAdminSecretArn" }
+        - PolicyName: WriteBackupsOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub
+                  - "${BucketArn}/backup/*"
+                  - BucketArn: !ImportValue { "Fn::Sub": "${Prefix}-BackupBucketArn" }
+        - PolicyName: SignalReady           # servern meddelar CloudFormation nar WordPress svarar
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:SignalResource
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${Prefix}-skala/*"
+
+  WebInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${Prefix}-web-profile"
+      Roles: [!Ref WebRole]
+
+  # ================= Bastion, enda vagen in med SSH =================
+  Bastion:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-PublicSubnetId" }
+      SecurityGroupIds: [!ImportValue { "Fn::Sub": "${Prefix}-BastionSgId" }]
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-bastion" }]
+
+Outputs:
+  WebInstanceProfileArn:
+    Value: !GetAtt WebInstanceProfile.Arn
+    Export: { Name: !Sub "${Prefix}-WebInstanceProfileArn" }
+  BastionPublicIp:
+    Value: !GetAtt Bastion.PublicIp
