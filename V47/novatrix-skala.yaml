@@ -36,7 +36,7 @@ Parameters:
     Description: Malvarde for genomsnittlig CPU i procent
   SiteVersion:
     Type: String
-    Default: v1
+    Default: v2
     Description: Visas pa /version.html. Andras for att visa en rullande utrullning
 
 Resources:
