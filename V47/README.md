@@ -131,6 +131,13 @@ Beräkningen är gjord i AWS Pricing Calculator för Europe (Stockholm).
 | S3 | 1 GB backuper |
 | Secrets Manager | 3 hemligheter, cirka 100 API-anrop per månad |
 
+Antalet publika IPv4-adresser kontrollerades i den uppbyggda miljön. ALB:n har en egen publik adress i varje zon, utöver de två webbservrarna och bastion, totalt 5 vid normal belastning:
+
+```
+aws ec2 describe-network-interfaces --region eu-north-1 --query "NetworkInterfaces[?Association.PublicIp].[Description,Attachment.InstanceId,AvailabilityZone,Association.PublicIp]" --output table
+```
+
+![alt text](<Publika adresser.png>)
 
 ### Resultat
 
@@ -190,6 +197,19 @@ Beräkningen är gjord i AWS Pricing Calculator för Europe (Stockholm).
 | 7 | Lasttest | Gruppen skalar ut till 4 och in till 2 | Skalning efter last |
 | 8 | Failover | Sajten svarar, ersättare startas | Tillgänglighet och self-healing |
 | 9 | Rullande utrullning | v1 byts mot v2 utan avbrott | Automatisk utrullning från en commit |
+
+### Test 1 och 2, stackar och zoner
+
+Alla fem stackar skapades från koden med `bygg-allt.sh`:
+
+![alt text](Delploy-2.png)
+
+![alt text](<Stacks complete.png>)
+
+
+Target groupen visar två healthy servrar, en i eu-north-1a och en i eu-north-1b. Gruppen har alltså spridit servrarna över båda zonerna, och båda klarar health checken på `/wp-login.php`:
+
+![alt text](<Target groups-1.png>)
 
 ### Test 3 och 4, WordPress
 
