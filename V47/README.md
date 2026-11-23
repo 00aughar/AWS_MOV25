@@ -37,6 +37,7 @@ Mallarna och skripten ligger i mappen `V47`, och rotens README har en rad om vec
 | `novatrix-webb` | Webbservern borttagen. Rollen får även läsa de nya hemligheterna och signalera till CloudFormation. |
 | `novatrix-skala` | Ny stack, se Delmoment 2–4 |
 
+
 # Delmoment 2, Förbered utrullning
 
 Nya servrar startas från launch templaten `novatrix-web-lt`. Jag valde user data i stället för en AMI av den befintliga servern. En sådan AMI innehåller wp-config med lösenordet och EFS-ID från en viss datastack, och slutar fungera när datastacken byggs om. Med user data läser varje server alltid aktuella värden.
@@ -49,6 +50,7 @@ Nya servrar startas från launch templaten `novatrix-web-lt`. Jag valde user dat
 | Instance profile | `novatrix-web-profile` med rollen `novatrix-web-role` |
 | Subnät | Inget, det väljer gruppen |
 | Övervakning | Detailed monitoring, CPU varje minut |
+
 
 ### Det user data gör på varje ny server
 
@@ -70,7 +72,7 @@ Lösenorden syns aldrig i koden eller i user data. Bara ARN:erna till hemlighete
 | Namn | `novatrix-web-asg` | |
 | Subnät | `novatrix-public-b` (1a) och `novatrix-public` (1b) | En server i varje zon |
 | Min / desired / max | 2 / 2 / 4 | Min 2 ger redundans, max 4 sätter taket för kostnaden |
-| Skalningsregel | Target tracking, genomsnittlig CPU 50 % | Enkel att förstå, gruppen skapar larmen själv |
+| Skalningsregel | Target tracking, genomsnittlig CPU 50 % | Varje sidvisning kör PHP, så CPU följer lasten. 50 % ger marginal medan nya servrar startar, vilket tar flera minuter. |
 | Health check | ELB, grace period 600 s | Även servrar som lever men inte svarar byts ut. User data behöver några minuter. |
 | Utrullning | `AutoScalingRollingUpdate`, en server i taget | En ändring i launch templaten rullas ut utan avbrott |
 
@@ -86,7 +88,7 @@ Servrarna ligger i de publika subnäten, eftersom de behöver internet när de s
 | Listener | HTTP 80, forward till `novatrix-web-tg` |
 | Target group | `novatrix-web-tg`, HTTP 80, servrarna registreras av gruppen |
 | Health check | `/wp-login.php`, svarskod 200, var 15:e sekund, 2 lyckade för frisk och 3 misslyckade för ofrisk |
-| Deregistration delay | 30 sekunder |
+| Deregistration delay | 30 sekunder. En sidvisning tar under en sekund, och standardvärdet 300 s hade gjort varje inskalning och utrullning onödigt långsam. |
 
 Health checken frågar efter `/wp-login.php` och inte `/`, eftersom sidan laddar WordPress och ansluter till databasen. Den svarar 200 bara när PHP, `wp-config` och databasen fungerar. Startsidan kan svara med en omdirigering.
 
@@ -99,7 +101,7 @@ bash V47/bygg-allt.sh $(curl -s https://checkip.amazonaws.com)
 ```
 Körning av deploy script:
 
-![alt text](Delploy.png)
+![alt text](Delploy-3.png)
 
 Target groups i portal:
 
@@ -289,6 +291,8 @@ Instanser skalas ner efter last test:
 | 16:31:59 | Larmet `AlarmLow` löser ut och desired sänks från 4 till 3. `i-01477421d24cbf7cc` avslutas. |
 | 16:37:19 | `AlarmLow` löser ut igen och desired sänks från 3 till 2. `i-0d28917b1783ac4db` avslutas. |
 
+Från att lasten startade till att de nya servrarna tog emot trafik gick cirka 9 minuter. Tiden består av flera steg: larmet AlarmHigh kräver att CPU ligger över målet i flera minuter i rad, servern ska starta, och user data installerar WordPress på några minuter. Därefter måste health checken lyckas två gånger. Inskalningen går långsammare, eftersom AlarmLow kräver låg CPU under ungefär 15 minuter innan gruppen tar bort kapacitet.
+
 Gruppen gick direkt från 2 till 4 servrar och inte en i taget. Target tracking räknar ut hur många servrar som behövs för att snittet ska hamna på målvärdet. Med två servrar på nästan 100 % krävs ungefär fyra för att nå 50 %, och max är 4.
 
 Inskalningen gick långsammare och i steg, 4 → 3 → 2, med start först cirka 15 minuter efter att lasten upphört. Det är avsiktligt: gruppen vill vara säker på att lasten verkligen har gått ner innan den tar bort kapacitet, så att den inte skalar in och ut om vartannat. Gruppen tog bort en server i varje zon, så att det fortfarande finns en server i både 1a och 1b.
@@ -409,6 +413,7 @@ Hela lösningen byggs från repot med ett kommando. Ingen loggar in på någon s
 | Stacken klar först när sajten fungerar | `CreationPolicy` och `cfn-signal` |
 | Ny version ut | `AutoScalingRollingUpdate` från en commit |
 
+
 ### Så svarar lösningen på last och fel
 
 | Händelse | Vad som händer, utan handpåläggning |
@@ -418,7 +423,16 @@ Hela lösningen byggs från repot med ett kommando. Ingen loggar in på någon s
 | **En server slutar svara** | Health checken på `/wp-login.php` misslyckas och lastbalanseraren slutar skicka trafik dit. Gruppen ser via ELB-kollen att servern inte är frisk, avslutar den och startar en ersättare. |
 | **En zon försvinner** | Lastbalanseraren skickar all trafik till servern i den andra zonen, och gruppen startar ersättare där. Databasen är kvar som felpunkt. |
 | **Ny version** | En ändring i launch templaten rullas ut en server i taget. Misslyckas en ny server rullas ändringen tillbaka. |
+| **Databasen försvinner** | WordPress kan inte svara, och health checken på `/wp-login.php` misslyckas på alla servrar samtidigt. Sajten är nere tills databasen är tillbaka. Eftersom health checken testar databasen kan gruppen dessutom börja byta ut friska servrar i onödan, när felet egentligen sitter i databasen. Det är priset för en health check som testar hela kedjan. Med Multi-AZ hade RDS växlat till reserven i den andra zonen inom några minuter. |
 
+### Kända begränsningar
+
+- **Databasen är Single-AZ** och därmed en medveten felpunkt. `Environment=prod` ger Multi-AZ.
+- **Servrarna har publika IP-adresser** för att slippa en NAT Gateway. De nås ändå bara via ALB och bastion.
+- **Cirka 30 sekunders avbrott vid failover**, tills health checken tagit servern ur trafik. En kortare health check hade minskat tiden men gett fler falsklarm.
+- **Kort period med en server i trafik under utrullning**, eftersom servern signalerar klar innan lastbalanserarens health check hunnit godkänna den.
+- **HTTPS saknas**, eftersom ett certifikat kräver ett eget domännamn.
+- **Backupen omfattar bara databasen**, inte filerna på EFS.
 
 # Kod
 
