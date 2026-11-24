@@ -4,7 +4,7 @@
 
 **August Hartwig**
 **MOV25**
-**x/x**
+**24/11**
 
 Fram till v46 körde Novatrix WordPress-sajt på en enda webbserver i en zon. Gick servern eller zonen ner var sajten borta, och en topp av besökare hamnade på samma maskin. Den här veckan ersätts servern av en Auto Scaling-grupp med minst två servrar i två Availability Zones, bakom en Application Load Balancer. Allt byggs som kod i en ny stack, `novatrix-skala`, och nya servrar installerar och konfigurerar sig själva utan handpåläggning.
 
