@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Novatrix AB - webbstacken (v48). IAM-roll och instance profile for webbservrarna,
+  bastion samt CloudWatch-agentens konfiguration och log groups. Sjalva webbservrarna startas av Auto Scaling-gruppen i novatrix-skala.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+    Description: Samma prefix som i de andra stackarna
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: aws_webserver
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [7, 14, 30]
+    Description: Hur lange loggarna sparas i CloudWatch Logs
+
+Resources:
+  # ================= Lager 1: IAM, rollen med exakt de rattigheter som behovs =================
+  WebRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-web-role"
+      Description: Webbservrarna far lasa sina hemligheter, skriva backuper och signalera klar, inget annat
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:                    # nytt i v48: agenten far skicka matvarden och loggar
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: ReadSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !ImportValue { "Fn::Sub": "${Prefix}-DbSecretArn" }
+                  - !ImportValue { "Fn::Sub": "${Prefix}-WpSaltSecretArn" }
+                  - !ImportValue { "Fn::Sub": "${Prefix}-WpAdminSecretArn" }
+        - PolicyName: WriteBackupsOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub
+                  - "${BucketArn}/backup/*"
+                  - BucketArn: !ImportValue { "Fn::Sub": "${Prefix}-BackupBucketArn" }
+        - PolicyName: SignalReady           # servern meddelar CloudFormation nar WordPress svarar
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:SignalResource
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${Prefix}-skala/*"
+
+  WebInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${Prefix}-web-profile"
+      Roles: [!Ref WebRole]
+
+  # ================= Nytt i v48: CloudWatch-agenten =================
+  # Konfigurationen och log groups ligger i webbstacken, sa att de finns innan
+  # forsta servern i novatrix-skala startar. Namnet maste borja med AmazonCloudWatch-
+  # eftersom CloudWatchAgentServerPolicy bara far lasa sadana parametrar.
+  AgentConfig:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "AmazonCloudWatch-${Prefix}"
+      Type: String
+      Description: CloudWatch-agentens konfiguration for webbservrarna
+      Value: !Sub |
+        {
+          "agent": { "metrics_collection_interval": 60, "run_as_user": "root" },
+          "metrics": {
+            "namespace": "CWAgent",
+            "append_dimensions": {
+              "AutoScalingGroupName": "${!aws:AutoScalingGroupName}",
+              "InstanceId": "${!aws:InstanceId}"
+            },
+            "aggregation_dimensions": [["AutoScalingGroupName"]],
+            "metrics_collected": {
+              "mem":  { "measurement": ["mem_used_percent"] },
+              "disk": { "measurement": ["used_percent"], "resources": ["/"], "drop_device": true }
+            }
+          },
+          "logs": {
+            "logs_collected": {
+              "files": {
+                "collect_list": [
+                  { "file_path": "/var/log/httpd/access_log",      "log_group_name": "${AccessLogGroup}",    "log_stream_name": "{instance_id}" },
+                  { "file_path": "/var/log/httpd/error_log",       "log_group_name": "${ErrorLogGroup}",     "log_stream_name": "{instance_id}" },
+                  { "file_path": "/var/log/cloud-init-output.log", "log_group_name": "${CloudInitLogGroup}", "log_stream_name": "{instance_id}" }
+                ]
+              }
+            }
+          }
+        }
+
+  AccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${Prefix}/httpd/access"
+      RetentionInDays: !Ref LogRetentionDays
+  ErrorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${Prefix}/httpd/error"
+      RetentionInDays: !Ref LogRetentionDays
+  CloudInitLogGroup:                        # user data-loggen, finns kvar aven nar servern ar borta
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${Prefix}/cloud-init"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ================= Bastion, enda vagen in med SSH =================
+  Bastion:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-PublicSubnetId" }
+      SecurityGroupIds: [!ImportValue { "Fn::Sub": "${Prefix}-BastionSgId" }]
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-bastion" }]
+
+Outputs:
+  WebInstanceProfileArn:
+    Value: !GetAtt WebInstanceProfile.Arn
+    Export: { Name: !Sub "${Prefix}-WebInstanceProfileArn" }
+  BastionPublicIp:
+    Value: !GetAtt Bastion.PublicIp
+  AgentConfigParameter:
+    Value: !Ref AgentConfig
+    Export: { Name: !Sub "${Prefix}-AgentConfigParameter" }
+  AccessLogGroupName:
+    Value: !Ref AccessLogGroup
+    Export: { Name: !Sub "${Prefix}-AccessLogGroup" }
+  ErrorLogGroupName:
+    Value: !Ref ErrorLogGroup
+    Export: { Name: !Sub "${Prefix}-ErrorLogGroup" }

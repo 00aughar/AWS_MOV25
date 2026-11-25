@@ -1,0 +1,26 @@
+# Logs Insights-fragor for Novatrix. Finns ocksa sparade i CloudWatch under Saved queries (novatrix/...).
+# Valj log group /novatrix/httpd/access eller /novatrix/httpd/error och ett kort tidsintervall.
+
+# 1. Svar per statuskod, utan lastbalanserarens health checks (access)
+filter @message not like /ELB-HealthChecker/
+| parse @message '* - - [*] "* * *" * * *' as ip, time, method, path, proto, status, bytes, rest
+| stats count(*) as antal by status
+| sort antal desc
+
+# 2. Forfragningar per server, visar att lastbalanseraren fordelar trafiken (access)
+filter @message not like /ELB-HealthChecker/
+| stats count(*) as antal by @logStream
+| sort antal desc
+
+# 3. Vanligaste sidorna (access)
+filter @message not like /ELB-HealthChecker/
+| parse @message '* - - [*] "* * *" * * *' as ip, time, method, path, proto, status, bytes, rest
+| stats count(*) as antal by path
+| sort antal desc
+| limit 10
+
+# 4. Fel och varningar den senaste timmen (error)
+fields @timestamp, @logStream, @message
+| filter @message like /error|fatal|warn/
+| sort @timestamp desc
+| limit 50

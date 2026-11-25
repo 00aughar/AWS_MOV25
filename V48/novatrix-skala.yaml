@@ -1,0 +1,260 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Novatrix AB - skalstacken (v48). Application Load Balancer, target group, listener,
+  launch template med user data, Auto Scaling-grupp over tva zoner och target tracking.
+  Nya servrar installerar och konfigurerar sig sjalva, utan handpalaggning.
+  Importerar fran nat-, data- och webbstacken. Byggs sist och rivs forst.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: aws_webserver
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  MinSize:
+    Type: Number
+    Default: 2
+    Description: Golv, en server i varje zon
+  MaxSize:
+    Type: Number
+    Default: 4
+    Description: Tak for kostnaden
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+  CpuTarget:
+    Type: Number
+    Default: 50
+    Description: Malvarde for genomsnittlig CPU i procent
+  SiteVersion:
+    Type: String
+    Default: v2
+    Description: Visas pa /version.html. Andras for att visa en rullande utrullning
+
+Resources:
+  # ================= Lastbalanseraren =================
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${Prefix}-web-tg"
+      VpcId: !ImportValue { "Fn::Sub": "${Prefix}-VpcId" }
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckPath: /wp-login.php        # svarar 200 nar PHP, wp-config och databasen fungerar
+      Matcher: { HttpCode: "200" }
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${Prefix}-alb"
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets:
+        - !ImportValue { "Fn::Sub": "${Prefix}-PublicSubnetId" }
+        - !ImportValue { "Fn::Sub": "${Prefix}-PublicSubnetBId" }
+      SecurityGroups: [!ImportValue { "Fn::Sub": "${Prefix}-AlbSgId" }]
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ================= Ritningen for varje ny server =================
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${Prefix}-web-lt"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds: [!ImportValue { "Fn::Sub": "${Prefix}-WebSgId" }]
+        IamInstanceProfile:
+          Arn: !ImportValue { "Fn::Sub": "${Prefix}-WebInstanceProfileArn" }
+        Monitoring: { Enabled: true }       # CPU varje minut, sa att gruppen reagerar snabbare
+        MetadataOptions: { HttpTokens: required }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: [{ Key: Name, Value: !Sub "${Prefix}-web" }]
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              export HOME=/root                     # WP-CLI behover en hemkatalog
+              # 1. Programvara
+              dnf install -y httpd php php-mysqlnd php-gd php-mbstring php-xml mariadb105 amazon-efs-utils aws-cfn-bootstrap amazon-cloudwatch-agent
+              systemctl enable --now httpd php-fpm
+
+              # Nytt i v48: CloudWatch-agenten med konfigurationen fran Parameter Store
+              /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c ssm:${AgentConfigParameter}
+              curl -s -o /etc/pki/ca-trust/source/anchors/rds-global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+              update-ca-trust
+
+              # 2. EFS pa wp-content, aven efter omstart
+              mkdir -p /var/www/html/wp-content
+              echo "${EfsId}:/ /var/www/html/wp-content efs _netdev,noresvport,tls,nofail 0 0" >> /etc/fstab
+              for i in $(seq 1 30); do
+                mount -a && mountpoint -q /var/www/html/wp-content && break
+                sleep 10
+              done
+
+              # 3. WordPress, -n skriver inte over filer som redan finns pa EFS
+              cd /tmp
+              curl -sO https://wordpress.org/latest.tar.gz
+              tar -xzf latest.tar.gz
+              cp -rn /tmp/wordpress/. /var/www/html/
+
+              # 4. Hemligheterna fran Secrets Manager med serverns IAM-roll
+              hamta () { aws secretsmanager get-secret-value --secret-id "$1" --region ${AWS::Region} --query SecretString --output text; }
+              falt () { python3 -c "import sys, json; print(json.load(sys.stdin)['$1'])"; }
+              DB=$(hamta "${DbSecretArn}")
+              DB_USER=$(echo "$DB" | falt username)
+              DB_PASS=$(echo "$DB" | falt password)
+              export SALT_SEED=$(hamta "${WpSaltSecretArn}")
+              ADMIN=$(hamta "${WpAdminSecretArn}")
+              WP_ADMIN_USER=$(echo "$ADMIN" | falt username)
+              WP_ADMIN_PASS=$(echo "$ADMIN" | falt password)
+
+              # 5. wp-config: databas, TLS och lastbalanserarens adress
+              cd /var/www/html
+              cp wp-config-sample.php wp-config.php
+              sed -i "s/database_name_here/wordpress/" wp-config.php
+              sed -i "s/username_here/$DB_USER/" wp-config.php
+              sed -i "s/password_here/$DB_PASS/" wp-config.php
+              sed -i "s/'localhost'/'${DbEndpoint}'/" wp-config.php
+              sed -i "/That's all, stop editing/i define( 'MYSQL_CLIENT_FLAGS', MYSQLI_CLIENT_SSL );" wp-config.php
+              sed -i "/That's all, stop editing/i define( 'WP_HOME', 'http://${LoadBalancer.DNSName}' );" wp-config.php
+              sed -i "/That's all, stop editing/i define( 'WP_SITEURL', 'http://${LoadBalancer.DNSName}' );" wp-config.php
+
+              # 6. Samma salts pa alla servrar, harledda fran den gemensamma hemligheten
+              python3 - <<'PY'
+              import hashlib, os, re
+              seed = os.environ["SALT_SEED"]
+              path = "/var/www/html/wp-config.php"
+              out = []
+              for line in open(path).read().split("\n"):
+                  m = re.match(r"define\(\s*'(\w+)',\s*'put your unique phrase here'", line)
+                  if m:
+                      line = "define( '%s', '%s' );" % (m.group(1), hashlib.sha256((seed + m.group(1)).encode()).hexdigest())
+                  out.append(line)
+              open(path, "w").write("\n".join(out))
+              PY
+              unset SALT_SEED
+              chmod 640 wp-config.php
+
+              # 7. Installera WordPress om det inte redan ar gjort, sa att ingen behover kora guiden
+              curl -s -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+              chmod +x /usr/local/bin/wp
+              sleep $((RANDOM % 20))                # tva servrar som startar samtidigt ska inte installera samtidigt
+              wp core is-installed --path=/var/www/html --allow-root || \
+                wp core install --path=/var/www/html --allow-root --url="http://${LoadBalancer.DNSName}" \
+                  --title="Novatrix AB" --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASS" \
+                  --admin_email="admin@example.com" --skip-email
+
+              # 8. Versionssida som visar version, instans och zon
+              TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+              IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+              AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+              echo "Novatrix ${SiteVersion} - $IID - $AZ" > /var/www/html/version.html
+
+              # 9. Behorigheter och omstart
+              rm -f /var/www/html/index.html
+              chown -R apache:apache /var/www/html
+              systemctl restart php-fpm httpd
+
+              # 10. Meddela CloudFormation att servern ar klar, forst nar wp-login.php svarar 200
+              RC=1
+              for i in $(seq 1 20); do
+                [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost/wp-login.php)" = "200" ] && RC=0 && break
+                sleep 15
+              done
+              /opt/aws/bin/cfn-signal -e $RC --stack ${AWS::StackName} --resource WebAsg --region ${AWS::Region}
+            - EfsId: !ImportValue { "Fn::Sub": "${Prefix}-EfsId" }
+              AgentConfigParameter: !ImportValue { "Fn::Sub": "${Prefix}-AgentConfigParameter" }
+              DbEndpoint: !ImportValue { "Fn::Sub": "${Prefix}-DbEndpoint" }
+              DbSecretArn: !ImportValue { "Fn::Sub": "${Prefix}-DbSecretArn" }
+              WpSaltSecretArn: !ImportValue { "Fn::Sub": "${Prefix}-WpSaltSecretArn" }
+              WpAdminSecretArn: !ImportValue { "Fn::Sub": "${Prefix}-WpAdminSecretArn" }
+
+  # ================= Gruppen som skoter antalet servrar =================
+  WebAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: Listener
+    CreationPolicy:                         # stacken ar klar forst nar servrarna signalerat att WordPress svarar
+      ResourceSignal:
+        Count: !Ref DesiredCapacity
+        Timeout: PT20M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:             # ny version av launch template rullas ut en server i taget
+        MinInstancesInService: !Ref DesiredCapacity
+        MaxBatchSize: 1
+        PauseTime: PT20M
+        WaitOnResourceSignals: true
+        SuspendProcesses: [HealthCheck, ReplaceUnhealthy, AZRebalance, AlarmNotification, ScheduledActions]
+      AutoScalingScheduledAction:
+        IgnoreUnmodifiedGroupSizeProperties: true
+    Properties:
+      AutoScalingGroupName: !Sub "${Prefix}-web-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:                    # ett publikt subnat per zon
+        - !ImportValue { "Fn::Sub": "${Prefix}-PublicSubnetId" }
+        - !ImportValue { "Fn::Sub": "${Prefix}-PublicSubnetBId" }
+      TargetGroupARNs: [!Ref TargetGroup]
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      HealthCheckType: ELB                  # byt aven servrar som lever men inte svarar
+      HealthCheckGracePeriod: 600           # user data installerar allt, det tar nagra minuter
+      MetricsCollection:
+        - Granularity: 1Minute
+
+  CpuScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WebAsg
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 300
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: !Ref CpuTarget
+
+Outputs:
+  SiteUrl:
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+    Export: { Name: !Sub "${Prefix}-SiteUrl" }
+  AlbDnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+  AsgName:
+    Value: !Ref WebAsg
+    Export: { Name: !Sub "${Prefix}-AsgName" }
+  TargetGroupArn:
+    Value: !Ref TargetGroup
+  AlbFullName:                              # dimensionen LoadBalancer i CloudWatch, app/novatrix-alb/...
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+    Export: { Name: !Sub "${Prefix}-AlbFullName" }
+  TargetGroupFullName:                      # dimensionen TargetGroup i CloudWatch, targetgroup/novatrix-web-tg/...
+    Value: !GetAtt TargetGroup.TargetGroupFullName
+    Export: { Name: !Sub "${Prefix}-TargetGroupFullName" }

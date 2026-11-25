@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Novatrix AB - overvakningsstacken (v48). SNS-topic for larm, larm pa CPU, minne,
+  disk, unhealthy servrar, 5xx-fel och en sajtkoll utifran, dashboarden novatrix-drift,
+  sparade Logs Insights-fragor och Lambda-funktionen novatrix-sajtkoll.
+  Importerar fran webb- och skalstacken. Byggs sist och rivs forst.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+  AlarmEmail:
+    Type: String
+    Description: E-postadressen som far larmen. Skickas vid korning, ligger inte i repot
+    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+  CpuThreshold:
+    Type: Number
+    Default: 70
+    Description: Medel-CPU i gruppen. Target tracking siktar pa 50, over 70 hanger skalningen inte med
+  MemDiskThreshold:
+    Type: Number
+    Default: 85
+    Description: Minne och disk i procent pa den server som har mest
+
+Resources:
+  # ================= Kanalen for larm =================
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${Prefix}-larm"
+      DisplayName: Novatrix larm
+
+  AlarmSubscription:                        # maste bekraftas med lanken i mailet
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  # ================= Larm pa gruppen, inte pa enskilda instanser =================
+  CpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-cpu-hog"
+      AlarmDescription: >
+        Medel-CPU i gruppen over troskeln i 5 minuter. Skalningen hanger inte med eller
+        gruppen star pa max. Titta pa gruppens Activity och om desired ar 4.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !ImportValue { "Fn::Sub": "${Prefix}-AsgName" }
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref CpuThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  MemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-minne"
+      AlarmDescription: >
+        Minst en server anvander mer minne an troskeln. Sok i error-loggen efter PHP-fel
+        och overvag en storre instanstyp.
+      Namespace: CWAgent
+      MetricName: mem_used_percent
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !ImportValue { "Fn::Sub": "${Prefix}-AsgName" }
+      Statistic: Maximum                    # varsta servern, ett medel doljer en server med slut pa minne
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref MemDiskThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  DiskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-disk"
+      AlarmDescription: >
+        Rotdisken pa minst en server ar fullare an troskeln. Kontrollera loggar och
+        temporara filer. Servern kan bytas ut med instance refresh.
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !ImportValue { "Fn::Sub": "${Prefix}-AsgName" }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref MemDiskThreshold
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  UnhealthyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-unhealthy"
+      AlarmDescription: >
+        Minst en server har varit unhealthy i 3 minuter. Gruppen ersatter den, men om
+        larmet aterkommer ar felet i launch templaten eller databasen. Las Reason i Targets.
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: TargetGroup
+          Value: !ImportValue { "Fn::Sub": "${Prefix}-TargetGroupFullName" }
+        - Name: LoadBalancer
+          Value: !ImportValue { "Fn::Sub": "${Prefix}-AlbFullName" }
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  Target5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-5xx"
+      AlarmDescription: >
+        WordPress svarar med serverfel. Ofta databasen. Sok i error-loggen med
+        Logs Insights-fragan novatrix/fel-senaste-timmen.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !ImportValue { "Fn::Sub": "${Prefix}-AlbFullName" }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching        # inga fel ger inga datapunkter
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  SiteCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-sajtkoll"
+      AlarmDescription: >
+        Sajten svarade inte utifran tva kontroller i rad, eller sa har kontrollen slutat
+        koras. Surfa till sajten och titta pa Targets och novatrix-sajtkolls logg.
+      Namespace: Novatrix/SiteCheck
+      MetricName: Available
+      Dimensions:
+        - Name: Site
+          Value: !Ref Prefix
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching           # en tyst kontroll ar ocksa ett fel
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  # ================= Serverless: sajtkoll utifran med Lambda =================
+  SiteCheckLogGroup:                        # skapas forst sa att loggen far lagringstid
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Prefix}-sajtkoll"
+      RetentionInDays: 14
+
+  SiteCheckRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: loggar-och-matvarden
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt SiteCheckLogGroup.Arn
+              - Effect: Allow                 # bara vart eget namespace, minsta mojliga rattighet
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals: { "cloudwatch:namespace": "Novatrix/SiteCheck" }
+
+  SiteCheckFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: SiteCheckLogGroup
+    Properties:
+      FunctionName: !Sub "${Prefix}-sajtkoll"
+      Description: Fragar sajten utifran via lastbalanseraren och skickar resultatet till CloudWatch
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 20                           # standard 3 s ar for kort, sajten far 10 s pa sig
+      MemorySize: 128
+      Role: !GetAtt SiteCheckRole.Arn
+      Environment:
+        Variables:
+          SITE_URL: !ImportValue { "Fn::Sub": "${Prefix}-SiteUrl" }
+          SITE_NAME: !Ref Prefix
+      Code:
+        ZipFile: |
+          import os, time, urllib.request
+          import boto3
+
+          cloudwatch = boto3.client("cloudwatch")
+
+          def handler(event, context):
+              url = os.environ["SITE_URL"].rstrip("/") + "/wp-login.php"
+              site = os.environ["SITE_NAME"]
+              ok = 0
+              start = time.time()
+              try:
+                  with urllib.request.urlopen(url, timeout=10) as svar:
+                      ok = 1 if svar.status == 200 else 0
+              except Exception as fel:
+                  print("Sajten svarade inte:", fel)
+              ms = round((time.time() - start) * 1000)
+
+              data = [{"MetricName": "Available", "Value": ok, "Unit": "Count",
+                       "Dimensions": [{"Name": "Site", "Value": site}]}]
+              if ok:
+                  data.append({"MetricName": "ResponseTimeMs", "Value": ms, "Unit": "Milliseconds",
+                               "Dimensions": [{"Name": "Site", "Value": site}]})
+              cloudwatch.put_metric_data(Namespace="Novatrix/SiteCheck", MetricData=data)
+
+              resultat = {"ok": ok, "ms": ms, "url": url}
+              print(resultat)
+              return resultat
+
+  SiteCheckSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Prefix}-sajtkoll-schema"
+      Description: Kor sajtkollen var femte minut
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Id: sajtkoll
+          Arn: !GetAtt SiteCheckFunction.Arn
+
+  SiteCheckPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SiteCheckFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SiteCheckSchedule.Arn
+
+  # ================= Sparade fragor i Logs Insights =================
+  QueryStatusCodes:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub "${Prefix}/svar-per-statuskod"
+      LogGroupNames: [!ImportValue { "Fn::Sub": "${Prefix}-AccessLogGroup" }]
+      QueryString: |
+        filter @message not like /ELB-HealthChecker/
+        | parse @message '* - - [*] "* * *" * * *' as ip, time, method, path, proto, status, bytes, rest
+        | stats count(*) as antal by status
+        | sort antal desc
+
+  QueryPerServer:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub "${Prefix}/forfragningar-per-server"
+      LogGroupNames: [!ImportValue { "Fn::Sub": "${Prefix}-AccessLogGroup" }]
+      QueryString: |
+        filter @message not like /ELB-HealthChecker/
+        | stats count(*) as antal by @logStream
+        | sort antal desc
+
+  QueryErrors:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub "${Prefix}/fel-senaste-timmen"
+      LogGroupNames: [!ImportValue { "Fn::Sub": "${Prefix}-ErrorLogGroup" }]
+      QueryString: |
+        fields @timestamp, @logStream, @message
+        | filter @message like /error|fatal|warn/
+        | sort @timestamp desc
+        | limit 50
+
+  # ================= Dashboarden: mar Novatrix bra just nu? =================
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${Prefix}-drift"
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              { "type": "alarm", "x": 0, "y": 0, "width": 24, "height": 3,
+                "properties": { "title": "Larm: star alla i OK mar Novatrix bra",
+                  "alarms": ["${CpuAlarm.Arn}", "${MemoryAlarm.Arn}", "${DiskAlarm.Arn}",
+                             "${UnhealthyAlarm.Arn}", "${Target5xxAlarm.Arn}", "${SiteCheckAlarm.Arn}"] } },
+              { "type": "metric", "x": 0, "y": 3, "width": 8, "height": 6,
+                "properties": { "title": "CPU i gruppen (medel)", "region": "${AWS::Region}", "view": "timeSeries",
+                  "stat": "Average", "period": 300,
+                  "metrics": [["AWS/EC2", "CPUUtilization", "AutoScalingGroupName", "${AsgName}"]],
+                  "annotations": { "horizontal": [{ "label": "Larm", "value": ${CpuThreshold} }] } } },
+              { "type": "metric", "x": 8, "y": 3, "width": 8, "height": 6,
+                "properties": { "title": "Minne och disk (varsta servern)", "region": "${AWS::Region}", "view": "timeSeries",
+                  "stat": "Maximum", "period": 60,
+                  "metrics": [["CWAgent", "mem_used_percent", "AutoScalingGroupName", "${AsgName}"],
+                              ["CWAgent", "disk_used_percent", "AutoScalingGroupName", "${AsgName}"]],
+                  "annotations": { "horizontal": [{ "label": "Larm", "value": ${MemDiskThreshold} }] } } },
+              { "type": "metric", "x": 16, "y": 3, "width": 8, "height": 6,
+                "properties": { "title": "Friska och sjuka servrar", "region": "${AWS::Region}", "view": "timeSeries",
+                  "stat": "Maximum", "period": 60,
+                  "metrics": [["AWS/ApplicationELB", "HealthyHostCount", "TargetGroup", "${TgName}", "LoadBalancer", "${AlbName}"],
+                              ["AWS/ApplicationELB", "UnHealthyHostCount", "TargetGroup", "${TgName}", "LoadBalancer", "${AlbName}"]] } },
+              { "type": "metric", "x": 0, "y": 9, "width": 8, "height": 6,
+                "properties": { "title": "Forfragningar och 5xx", "region": "${AWS::Region}", "view": "timeSeries",
+                  "stat": "Sum", "period": 300,
+                  "metrics": [["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${AlbName}"],
+                              ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${AlbName}"]] } },
+              { "type": "metric", "x": 8, "y": 9, "width": 8, "height": 6,
+                "properties": { "title": "Svarstid utifran (sajtkoll) och fran servrarna", "region": "${AWS::Region}", "view": "timeSeries",
+                  "period": 300,
+                  "metrics": [["Novatrix/SiteCheck", "ResponseTimeMs", "Site", "${Prefix}", { "stat": "Average", "label": "Sajtkoll ms" }],
+                              ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${AlbName}", { "stat": "Average", "label": "Servrar s", "yAxis": "right" }]] } },
+              { "type": "metric", "x": 16, "y": 9, "width": 8, "height": 6,
+                "properties": { "title": "Antal servrar i gruppen", "region": "${AWS::Region}", "view": "timeSeries",
+                  "stat": "Maximum", "period": 60,
+                  "metrics": [["AWS/AutoScaling", "GroupInServiceInstances", "AutoScalingGroupName", "${AsgName}"],
+                              ["AWS/AutoScaling", "GroupDesiredCapacity", "AutoScalingGroupName", "${AsgName}"]] } },
+              { "type": "log", "x": 0, "y": 15, "width": 24, "height": 6,
+                "properties": { "title": "Svar per statuskod, utan health checks", "region": "${AWS::Region}", "view": "table",
+                  "query": "SOURCE '${AccessLog}' | filter @message not like /ELB-HealthChecker/ | parse @message '* - - [*] \"* * *\" * * *' as ip, time, method, path, proto, status, bytes, rest | stats count(*) as antal by status | sort antal desc" } }
+            ]
+          }
+        - AsgName: !ImportValue { "Fn::Sub": "${Prefix}-AsgName" }
+          AlbName: !ImportValue { "Fn::Sub": "${Prefix}-AlbFullName" }
+          TgName: !ImportValue { "Fn::Sub": "${Prefix}-TargetGroupFullName" }
+          AccessLog: !ImportValue { "Fn::Sub": "${Prefix}-AccessLogGroup" }
+
+Outputs:
+  AlarmTopicArn:
+    Value: !Ref AlarmTopic
+  DashboardUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/${Prefix}-drift"
+  SiteCheckFunctionName:
+    Value: !Ref SiteCheckFunction
