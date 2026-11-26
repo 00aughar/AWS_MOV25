@@ -8,7 +8,7 @@
 
 Sedan v47 startar och avslutar en Auto Scaling-grupp Novatrix webbservrar själv. Det gör lösningen skalbar, men också svårare att se: en server som byts ut tar sina loggar med sig, och health checken säger bara att servrarna svarar, inte hur de mår. Den här veckan får lösningen central monitorering i CloudWatch av CPU, minne, disk och loggar, med larm som skickas med e-post. Allt är kod i en ny stack, `novatrix-overvakning`. En liten del körs dessutom serverless, en Lambda-funktion som kontrollerar sajten utifrån, och den är första steget i en cloud native-strategi för Novatrix.
 
-![Arkitektur v48](arkitektur-v48.png)
+![alt text](arkitektur-v48.png)
 
 # Delmoment 1, Repo
 
@@ -175,6 +175,25 @@ Larmmailet för `novatrix-cpu-hog` kommer kl. 11:34
 
 ![alt text](<lasttest larm notis.png>)
 
+Mailet som text:
+
+```text
+Ämne: ALARM: "novatrix-cpu-hog" in EU (Stockholm)
+Alarm Name: novatrix-cpu-hog
+Alarm Description: Medel-CPU i gruppen over troskeln i 5 minuter. Skalningen hanger inte med eller gruppen star pa max. Titta pa gruppens Activity och om desired ar 4.
+State Change: OK -> ALARM
+Reason for State Change: Threshold Crossed: 1 datapoint [80.56101196454873 (25/11/26 10:29:00)] was greater than the threshold (70.0).
+Timestamp: Wednesday 25 November, 2026 10:34:39 UTC
+AWS Account: xxxxxxxxxxxx
+Threshold: The alarm is in the ALARM state when the metric is GreaterThanThreshold 70.0 for at least 1 of the last 1 period(s) of 300 seconds. 
+Monitored Metric:
+- MetricNamespace:                     AWS/EC2
+- MetricName:                          CPUUtilization
+- Dimensions:                          [AutoScalingGroupName = novatrix-web-asg]
+- Period:                              300 seconds
+- Statistic:                           Average
+- Unit:                                not specified
+```
 
 Dashboard visar att CPU användning skalar upp, instanser skalar upp från 2 till 4, nya log streams syns.
 
@@ -197,6 +216,24 @@ Notis att CPU belastningen är tillbaka på OK nivå under 70%.
 `novatrix-drift` är byggd för en fråga: mår Novatrix bra just nu? Larmen ligger överst, och står alla i OK är svaret ja. Graferna under förklarar varför när svaret är nej: CPU för gruppen, minne och disk på den värsta servern, friska och sjuka servrar, förfrågningar och 5xx, svarstid utifrån och från servrarna, antal servrar i gruppen och statuskoder från access-loggen.
 
 ![alt text](<Dashboard CloudWatch.png>)
+
+### Vad monitoreringen kostar
+
+Beräknat i AWS Pricing Calculator för Stockholm med två servrar i normalläge.
+
+| Del | Antagande | Per månad |
+|---|---|---|
+| Egna mätvärden | 2 servrar × 2 (minne och disk) + 2 gruppvärden + 2 från sajtkollen = 8 | 2,40 USD |
+| Larm | 6 st | 0,60 USD |
+| Dashboard | 1 st (de tre första är gratis) | 0 |
+| Loggar | 0,5 GB inskick per månad, 14 dagars lagring, 1 GB sökning | 0,28 USD |
+| Lambda | 8 640 anrop, 200 ms, 128 MB | 0 (gratisnivån) |
+| **Totalt** | | **3,28 USD** |
+
+**Länk till beräkningen:** https://calculator.aws/#/estimate?id=8273ba221a2fb102d39b3ea9e89a1c7e26b70c94
+
+Monitoreringen kostar cirka 3,28 USD per månad, vilket motsvarar ungefär 4 % av miljöns totala kostnad på 81,26 USD. Nästan hela kostnaden kommer från de egna mätvärdena och larmen. Loggarna kostar lite, eftersom alla log groups har 14 dagars lagringstid och gamla rader tas bort automatiskt. Utan lagringstid hade loggarna sparats för alltid och kostnaden vuxit varje månad. Disken mäts bara för serverns egen disk (/) och inte för EFS, som växer automatiskt och aldrig blir full. Agenten samlar dessutom bara minne och disk, vilket håller nere antalet mätvärden. Kostnaden kan öka något när gruppen skalar ut eller byter servrar, eftersom varje ny server ger nya mätvärden med sitt eget instans-ID. Sajtkollen i Lambda ryms helt i gratisnivån.
+
 
 # Delmoment 3, Central loggning
 
@@ -259,6 +296,20 @@ fields @timestamp, @logStream, @message
 ![alt text](<svar per statuskod log analytics.png>)
 
 ![alt text](<förfrågningar per server log analytics.png>)
+
+Resultat som text:
+
+```text
+Svar per statuskod (utan health checks)
+status | antal
+200    | 31
+404    | 1
+
+Förfrågningar per server
+@logStream          | antal
+i-070cfea6879c95cc7 | 17
+i-07e15a775a2f7af33 | 15
+```
 
 Frågorna är sparade som kod och söker i alla servrars loggar på en gång. Förfrågningarna fördelas jämnt mellan de två servrarna, 17 och 15, vilket visar att lastbalanseraren sprider trafiken. Utan health checks svarade sajten 200 på 31 förfrågningar och 404 på en.
 
@@ -372,17 +423,19 @@ Rekommendationen att flytta webbdelen till Fargate står kvar, främst för drif
 
 # Delmoment 5, Varför central monitorering är väsentlig
 
-**Servrarna är tillfälliga.** I Novatrix lösning bestämmer Auto Scaling-gruppen när servrar startas och avslutas, vid last, vid fel och vid utrullning. Allt som bara finns på en server, till exempel Apaches loggar, försvinner när servern avslutas. Det enda som finns kvar är det som skickats till ett centralt ställe.
+Sedan v47 är det Auto Scaling-gruppen och inte vi som bestämmer när Novatrix webbservrar startas och avslutas. Det gör lösningen skalbar, men det betyder också att ingen server går att räkna med att den finns kvar. Monitoreringen måste därför ligga utanför servrarna, i CloudWatch, och svara på tre frågor: lever sajten, mår den och vad hände?
 
-**Att logga in på servrarna fungerar inte längre.** Med fyra servrar som byts ut ibland går det inte att logga in med SSH och titta. Servern som hade felet finns kanske inte kvar. Med central loggning går ett fel klockan tre att undersöka klockan åtta.
+**Lever den?** Lastbalanserarens health check frågar varje server om den svarar, men bara inifrån VPC:n. Sajtkollen i Lambda frågar utifrån, som en besökare, var femte minut. Den märker också om felet ligger i lastbalanseraren eller om alla servrar är nere samtidigt, vilket health checken inte kan rapportera.
 
-**CPU, minne och disk varnar i förväg.** Health checken säger bara att servern svarar. En disk som fylls under en vecka eller ett minne som tar slut syns i mätvärdena långt innan WordPress slutar fungera.
+**Mår den?** Att en server svarar betyder inte att den mår bra. Under lasttestet låg CPU på cirka 97 % medan minnet stod still på cirka 33 %. Det visar att varje resurs måste mätas för sig. En server kan lika gärna få slut på minne eller disk med låg CPU. AWS ser bara CPU utifrån, så utan CloudWatch-agenten hade två av tre mätvärden saknats.
 
-**Skalningen bygger på samma mätvärden.** Target tracking är två CloudWatch-larm på CPU. Utan mätvärden finns ingen automatisk skalning, så monitorering och skalbarhet hör ihop.
+**Vad hände?** När gruppen skalade in efter lasttestet avslutades två servrar, men deras loggar finns kvar i CloudWatch och går att söka i. Med loggarna kvar på servrarna hade de försvunnit. Med central loggning kunde vi också söka i alla servrars loggar på en gång och se att en 404 i access-loggen var en botskanning och inte ett fel i WordPress.
 
-**Larm ersätter att någon tittar hela tiden.** Ju mer som sker automatiskt, desto viktigare är det att få veta när automatiken inte räcker, till exempel när gruppen står på max och CPU ändå är hög. Ett larm som når rätt person med en tydlig åtgärd är det som gör att man kan lita på automatiken.
+**Larmen ersätter att någon tittar hela tiden.** Ju mer som sker automatiskt, desto viktigare är det att få veta när automatiken inte räcker. Under lasttestet kom ALARM-mailet 11:34 utan att någon satt och tittade på dashboarden, och OK-mailet kom 11:43 när lasten var borta. Larmen pekar på hela gruppen och inte på enskilda servrar. Ett larm på en instans hade blivit tyst när gruppen bytte ut servern, utan att någon märkte det.
 
-**Larmen måste peka på gruppen.** I en skalbar miljö blir ett larm på en enskild instans tyst när instansen byts ut. Därför räknas minne och disk ihop per Auto Scaling-grupp.
+**Skalning och monitorering hör ihop.** Target tracking och vårt larm `novatrix-cpu-hog` läser samma CPU-mätvärde. I lasttestet skalade gruppen ut från 2 till 4 servrar, medan larmet skickade mail. Skalningen agerar automatiskt, och larmet säger till om CPU ändå ligger över 70 %, till exempel om gruppen redan står på max 4 servrar och en människa behöver ta ställning.
+
+Utan central monitorering hade Novatrix haft en lösning som skalar och lagar sig själv, men ingen möjlighet att se hur den mår, få veta när något går fel eller förstå i efterhand vad som hände.
 
 # VG
 
